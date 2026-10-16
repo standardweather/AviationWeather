@@ -51,7 +51,7 @@
   map.getPane("labels").style.pointerEvents = "none";
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, attribution: "Esri" }).addTo(map);
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, pane: "labels", opacity: 0.85 }).addTo(map);
-  map.attributionControl.addAttribution("NOAA Aviation Weather Center · NOAA nowCOAST");
+  map.attributionControl.addAttribution("NOAA AWC · nowCOAST");
   const canvas = L.canvas({ pane: "points", padding: 0.3 });
 
   const layers = {
@@ -284,7 +284,7 @@
     setTabs();
     drawMetars();
     render();
-    if (m && fly) map.flyTo([m.lat, m.lon], Math.max(map.getZoom(), 8), { duration: 0.6 });
+    if (m && fly) map.flyTo([m.lat, m.lon], Math.max(map.getZoom(), 7), { duration: 0.6 });
     try { state.taf = await loadTaf(id); } catch { state.taf = null; }
     if (state.station === id) render();
   }
