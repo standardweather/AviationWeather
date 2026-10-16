@@ -82,15 +82,15 @@
     return gj;
   }
 
-  // Layers are capped at 2,000 records per request; page through the rest.
+  // Layers are capped at 2,000 records per request. Count first, then fetch every page at once:
+  // the METAR layer takes several seconds per page, so paging one after another is slow.
   async function queryAll(id, params) {
-    const out = [];
-    for (let offset = 0; offset < 20000; offset += 2000) {
-      const gj = await query(id, { ...params, resultOffset: offset, resultRecordCount: 2000 });
-      out.push(...gj.features);
-      if (!gj.exceededTransferLimit && !(gj.properties && gj.properties.exceededTransferLimit) && gj.features.length < 2000) break;
-    }
-    return out;
+    const q = new URLSearchParams({ where: "1=1", returnCountOnly: "true", f: "json", ...params });
+    q.delete("outFields");
+    const { count = 0 } = await (await fetch(`${AWC}/${id}/query?${q}`)).json();
+    const pages = Array.from({ length: Math.max(1, Math.ceil(count / 2000)) }, (_, i) => i * 2000);
+    const results = await Promise.all(pages.map((offset) => query(id, { ...params, resultOffset: offset, resultRecordCount: 2000 })));
+    return results.flatMap((gj) => gj.features);
   }
 
   // —— Radar loop (same source as NowWeather) ——————————————————————————
@@ -479,7 +479,9 @@
   async function init() {
     loadRadar(true);
     setStatus("Loading aviation weather…");
-    const res = await Promise.allSettled([loadMetars(), loadAdvisories(), loadPireps()]);
+    // Show advisories and PIREPs as soon as they arrive; METARs take longest.
+    const settle = (pr) => pr.then(() => { if (state.view !== "airports" || !linked) render(); });
+    const res = await Promise.allSettled([loadMetars(), settle(loadAdvisories()), settle(loadPireps())]);
     res.forEach((r) => { if (r.status === "rejected") console.error(r.reason); });
     setStatus(res[0].status === "rejected" ? "METARs unavailable — try again shortly" : "");
     if (linked && state.metarIndex[linked]) selectStation(linked, true, true);
