@@ -43,7 +43,10 @@
   };
 
   // —— Map ————————————————————————————————————————————————————————
-  const map = L.map("map", { zoomControl: false, minZoom: 3, maxZoom: 12, preferCanvas: false }).fitBounds(CONUS);
+  // A link to an airport (#KBOS) opens straight on it once METARs load, without drawing the national view first.
+  const linked = /^[A-Z0-9]{3,4}$/.test(location.hash.slice(1).toUpperCase()) ? location.hash.slice(1).toUpperCase() : null;
+  const map = L.map("map", { zoomControl: false, minZoom: 3, maxZoom: 12, preferCanvas: false });
+  if (!linked) map.fitBounds(CONUS);
   L.control.zoom({ position: "topright" }).addTo(map);
   map.attributionControl.setPrefix("");
   [["radar", 300], ["tcf", 340], ["gairmet", 380], ["sigmet", 420], ["highlight", 450], ["points", 620], ["labels", 640]]
@@ -479,8 +482,8 @@
     const res = await Promise.allSettled([loadMetars(), loadAdvisories(), loadPireps()]);
     res.forEach((r) => { if (r.status === "rejected") console.error(r.reason); });
     setStatus(res[0].status === "rejected" ? "METARs unavailable — try again shortly" : "");
-    const hash = location.hash.slice(1).toUpperCase();
-    if (/^[A-Z0-9]{3,4}$/.test(hash)) selectStation(hash, true, true); else render();   // a shared link opens straight on the airport
+    if (linked && state.metarIndex[linked]) selectStation(linked, true, true);
+    else { if (linked) map.fitBounds(CONUS); render(); }
 
     setInterval(() => loadMetars().then(() => { if (state.view === "airports") render(); }).catch(() => {}), 5 * 60000);
     setInterval(() => { loadAdvisories().then(() => { if (state.view === "advisories") render(); }).catch(() => {}); loadPireps().then(() => { if (state.view === "pireps") render(); }).catch(() => {}); }, 5 * 60000);
