@@ -275,7 +275,7 @@
     return { raw, periods };
   }
 
-  async function selectStation(id, fly) {
+  async function selectStation(id, fly, instant) {
     const m = state.metarIndex[id];
     state.station = id;
     state.taf = null;
@@ -284,7 +284,7 @@
     setTabs();
     drawMetars();
     render();
-    if (m && fly) map.flyTo([m.lat, m.lon], Math.max(map.getZoom(), 7), { duration: 0.6 });
+    if (m && fly) instant ? map.setView([m.lat, m.lon], 7) : map.flyTo([m.lat, m.lon], Math.max(map.getZoom(), 7), { duration: 0.6 });
     try { state.taf = await loadTaf(id); } catch { state.taf = null; }
     if (state.station === id) render();
   }
@@ -480,7 +480,7 @@
     res.forEach((r) => { if (r.status === "rejected") console.error(r.reason); });
     setStatus(res[0].status === "rejected" ? "METARs unavailable — try again shortly" : "");
     const hash = location.hash.slice(1).toUpperCase();
-    if (/^[A-Z0-9]{3,4}$/.test(hash)) selectStation(hash, true); else render();
+    if (/^[A-Z0-9]{3,4}$/.test(hash)) selectStation(hash, true, true); else render();   // a shared link opens straight on the airport
 
     setInterval(() => loadMetars().then(() => { if (state.view === "airports") render(); }).catch(() => {}), 5 * 60000);
     setInterval(() => { loadAdvisories().then(() => { if (state.view === "advisories") render(); }).catch(() => {}); loadPireps().then(() => { if (state.view === "pireps") render(); }).catch(() => {}); }, 5 * 60000);
