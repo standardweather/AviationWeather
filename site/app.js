@@ -29,10 +29,29 @@
     ZULU: ["Zulu", ["ICE", "FZLVL", "M_FZLVL"]],
   };
   const SERIES_OF = Object.fromEntries(Object.entries(GAIRMET_SERIES).flatMap(([k, [, hz]]) => hz.map((h) => [h, k])));
-  // Advisory types that can be switched on and off individually: [color, on by default].
-  const ADV_TYPES = {
-    "Convective SIGMET": ["#ff4d4d", true], SIGMET: ["#ff9548", true], AIRMET: ["#ffd84a", true],
-    CWA: ["#ffffff", true], "International SIGMET": ["#ff7ab8", false],
+  // Each advisory product is broken down by hazard so every combination can be shown or hidden.
+  const HAZ = {
+    convective: ["Thunderstorms / convective", "#ff4d4d"], turb: ["Turbulence", "#ff9548"], ice: ["Icing", "#6fe3e8"],
+    ifr: ["IFR / mountain obscuration", "#b38bff"], ash: ["Volcanic ash", "#c8c8c8"], tc: ["Tropical cyclone", "#ff7ab8"],
+    dust: ["Dust / sandstorm", "#d2b48c"], other: ["Other", "#9aa3c0"],
+  };
+  const hazOf = (h) => {
+    const t = String(h || "").toUpperCase();
+    if (/CONV|^TS|TSGR|CB/.test(t)) return "convective";
+    if (/TURB|MTW|LLWS/.test(t)) return "turb";
+    if (/ICE|ICG|FZRA/.test(t)) return "ice";
+    if (/IFR|OBSC|^MT|PCPN|VIS|CIG/.test(t)) return "ifr";
+    if (/ASH|^VA/.test(t)) return "ash";
+    if (/^TC|TROP/.test(t)) return "tc";
+    if (/^DS|^SS|DUST|SAND/.test(t)) return "dust";
+    return "other";
+  };
+  // product: [label, hazards offered, on by default]
+  const ADV_PRODUCTS = {
+    SIGMET: ["SIGMETs (domestic)", ["convective", "turb", "ice", "ifr", "ash", "other"], true],
+    AIRMET: ["AIRMETs (text)", ["turb", "ice", "ifr", "other"], true],
+    CWA: ["Center Weather Advisories", ["convective", "turb", "ice", "ifr", "other"], true],
+    ISIGMET: ["International SIGMETs", ["convective", "turb", "ice", "ash", "tc", "dust", "other"], false],
   };
   const SAT = { ir: ["goes_longwave_imagery", "IR"], vis: ["goes_visible_imagery", "Visible"], wv: ["goes_water_vapor_imagery", "Water vapor"] };
   const SIGMET_COLOR = (h) => (/CONVECTIVE/.test(h) ? "#ff4d4d" : /TURB/.test(h) ? "#ff9548" : /ICE/.test(h) ? "#6fe3e8" : /ASH|VA/.test(h) ? "#c0c0c0" : "#ff7ab8");
@@ -51,7 +70,7 @@
     view: "airports", station: null, metars: [], metarIndex: {}, taf: null,
     sigmets: null, isigmets: null, cwas: null, gairmets: null, gairmetOn: Object.fromEntries(Object.keys(GAIRMET).map((k) => [k, !/FZLVL/.test(k)])),
     pireps: [], tcf: null, selected: null,
-    advOn: Object.fromEntries(Object.entries(ADV_TYPES).map(([k, [, on]]) => [k, on])),
+    advOn: Object.fromEntries(Object.entries(ADV_PRODUCTS).flatMap(([prod, [, hz, on]]) => hz.map((h) => [`${prod}|${h}`, on]))),
     sat: { kind: "ir", layer: null, time: null },
     on: { metars: true, radar: true, sigmets: true, gairmets: true, pireps: true, tcf: false },
     radar: { times: [], layers: [], idx: 0, timer: null, opacity: 0.6 },
@@ -346,28 +365,32 @@
 
   function advisoryItems() {
     const items = [];
+    const add = (o) => { o.haz = hazOf(o.rawHazard); o.color = HAZ[o.haz][1]; items.push(o); };
     (state.sigmets?.features || []).forEach((f, i) => {
       const p = f.properties;
-      const conv = /CONVECTIVE/.test(p.hazard);
-      items.push({ key: `s${i}`, f, kind: p.airsigmet_type === "AIRMET" ? "AIRMET" : conv ? "Convective SIGMET" : "SIGMET", hazard: p.hazard, sev: p.severity,
-        from: p.valid_time_from, to: p.valid_time_to, text: p.raw_text, color: SIGMET_COLOR(p.hazard) });
+      const airmet = p.airsigmet_type === "AIRMET";
+      add({ key: `s${i}`, f, prod: airmet ? "AIRMET" : "SIGMET", kind: airmet ? "AIRMET" : /CONVECTIVE/.test(p.hazard) ? "Convective SIGMET" : "SIGMET",
+        rawHazard: p.hazard, hazard: p.hazard, sev: p.severity, from: p.valid_time_from, to: p.valid_time_to, text: p.raw_text });
     });
     (state.cwas?.features || []).forEach((f, i) => {
       const p = f.properties;
-      items.push({ key: `c${i}`, f, kind: "CWA", hazard: `${p.hazard}${p.qualifier ? ` · ${p.qualifier}` : ""}`, from: awcTime(p.validtimef), to: awcTime(p.validtimet), text: p.cwatext, color: "#ffffff", place: `${p.cwsu} ${p.name}` });
+      add({ key: `c${i}`, f, prod: "CWA", kind: "CWA", rawHazard: p.hazard, hazard: `${p.hazard}${p.qualifier ? ` · ${p.qualifier}` : ""}`, from: awcTime(p.validtimef), to: awcTime(p.validtimet), text: p.cwatext, place: `${p.cwsu} ${p.name}` });
     });
     (state.isigmets?.features || []).forEach((f, i) => {
       const p = f.properties;
-      items.push({ key: `i${i}`, f, kind: "International SIGMET", hazard: `${p.hazard}${p.qualifier ? ` · ${p.qualifier}` : ""}`, from: awcTime(p.validtimef), to: awcTime(p.validtimet), text: p.rawsigmet, color: SIGMET_COLOR(p.hazard), place: p.firname });
+      add({ key: `i${i}`, f, prod: "ISIGMET", kind: "International SIGMET", rawHazard: p.hazard, hazard: `${p.hazard}${p.qualifier ? ` · ${p.qualifier}` : ""}`, from: awcTime(p.validtimef), to: awcTime(p.validtimet), text: p.rawsigmet, place: p.firname });
     });
     return items;
   }
+  const shown = (it) => !!state.advOn[`${it.prod}|${it.haz}`];
+  // Color shows the hazard; line style shows the product.
+  const LINE = { SIGMET: [2.4, null], AIRMET: [1.8, "8 4"], CWA: [1.8, "6 4"], ISIGMET: [1.4, "1 4"] };
 
   function drawAdvisories() {
     layers.sigmets.clearLayers(); layers.gairmets.clearLayers(); layers.tcf.clearLayers();
     for (const it of advisoryItems()) {
-      if (!state.advOn[it.kind]) continue;
-      L.geoJSON(it.f, { pane: "sigmet", style: { color: it.color, weight: it.kind === "CWA" ? 1.6 : 2.2, dashArray: it.kind === "CWA" ? "5 4" : it.kind === "AIRMET" ? "8 4" : null, fillColor: it.color, fillOpacity: 0.08 } })
+      if (!shown(it)) continue;
+      L.geoJSON(it.f, { pane: "sigmet", style: { color: it.color, weight: LINE[it.prod][0], dashArray: LINE[it.prod][1], lineCap: "round", fillColor: it.color, fillOpacity: it.prod === "ISIGMET" ? 0.04 : 0.08 } })
         .bindTooltip(`${esc(it.kind)} · ${esc(it.hazard)} — click for details`, { className: "tw-tip", sticky: true })
         .addTo(layers.sigmets);
     }
@@ -393,18 +416,23 @@
     const gvalid = gfeats[0]?.properties.validtime;
     const check = (attr, key, on, color, label, n) =>
       `<label${n ? "" : ' style="opacity:.45"'}><input type="checkbox" ${attr}="${key}" ${on ? "checked" : ""} ${n ? "" : "disabled"} /><i class="dot" style="background:${color}"></i>${esc(label)} <b class="n">${n}</b></label>`;
-    let html = `<div class="pad"><h5 class="sub">SIGMETs and advisories</h5><div class="checks">${Object.entries(ADV_TYPES).map(([k, [c]]) =>
-      check("data-advtype", k, state.advOn[k], c, k === "AIRMET" ? "AIRMETs (text)" : `${k}s`, items.filter((i) => i.kind === k).length)).join("")}</div>`;
+    let html = `<div class="pad">`;
+    for (const [prod, [label, hazards]] of Object.entries(ADV_PRODUCTS)) {
+      const mine = items.filter((i) => i.prod === prod);
+      if (prod === "AIRMET" && !mine.length) continue;   // text AIRMETs rarely appear; G-AIRMETs below replace them
+      html += `<h5 class="sub">${esc(label)} <span class="all"><a href="#" data-allprod="${prod}" data-mode="on">All</a> · <a href="#" data-allprod="${prod}" data-mode="off">None</a></span></h5><div class="checks">${hazards.map((h) =>
+        check("data-adv", `${prod}|${h}`, state.advOn[`${prod}|${h}`], HAZ[h][1], HAZ[h][0], mine.filter((i) => i.haz === h).length)).join("")}</div>`;
+    }
     for (const [series, [name, hazards]] of Object.entries(GAIRMET_SERIES)) {
       html += `<h5 class="sub">G-AIRMET ${name}</h5><div class="checks">${hazards.map((h) => check("data-gair", h, state.gairmetOn[h], GAIRMET[h][0], GAIRMET[h][1], gcount(h))).join("")}</div>`;
     }
     html += `${gvalid ? `<p class="note">G-AIRMETs valid ${esc(String(gvalid).slice(8, 10))}/${esc(String(gvalid).slice(11, 13))}${esc(String(gvalid).slice(14, 16))}Z. Click any area on the map for details.</p>` : ""}</div>`;
-    for (const g of Object.keys(ADV_TYPES)) {
-      const list = items.filter((i) => i.kind === g);
-      if (!list.length || !state.advOn[g]) continue;
-      html += `<div class="group open"><div class="row" style="cursor:default"><i class="sw" style="background:${list[0].color}"></i><span class="name">${esc(g === "AIRMET" ? "AIRMETs (text)" : `${g}s`)}</span><span class="num">${list.length}</span></div>
+    for (const [prod, [label]] of Object.entries(ADV_PRODUCTS)) {
+      const list = items.filter((i) => i.prod === prod && shown(i));
+      if (!list.length) continue;
+      html += `<div class="group open"><div class="row" style="cursor:default"><i class="sw" style="background:#9aa3c0"></i><span class="name">${esc(label)}</span><span class="num">${list.length}</span></div>
         ${list.map((it) => `<div class="alert${state.selected === it.key ? " sel" : ""}">
-          <button class="row" data-adv="${it.key}"><span class="name">${esc(it.hazard)}${it.sev ? ` · ${esc(it.sev)}` : ""}<small>${esc(it.place || "")}</small></span><span class="num">${ddhhZ(it.from)}–${hhmmZ(it.to)}</span></button>
+          <button class="row" data-advkey="${it.key}"><span class="name"><i class="dot" style="background:${it.color}"></i>${esc(it.hazard)}${it.sev ? ` · ${esc(it.sev)}` : ""}<small>${esc(it.place || "")}</small></span><span class="num">${ddhhZ(it.from)}–${hhmmZ(it.to)}</span></button>
           ${state.selected === it.key ? `<div class="alert__body">${advDetailsTable(it)}<pre>${esc(it.text)}</pre></div>` : ""}</div>`).join("")}</div>`;
     }
     if (!items.length) html += `<p class="empty">No SIGMETs or CWAs in effect.</p>`;
@@ -464,7 +492,7 @@
     const pt = [e.latlng.lng, e.latlng.lat];
     const parts = [];
     if (state.on.sigmets) {
-      advisoryItems().filter((it) => state.advOn[it.kind] && contains(it.f.geometry, pt)).forEach((it) => {
+      advisoryItems().filter((it) => shown(it) && contains(it.f.geometry, pt)).forEach((it) => {
         parts.push(`<h4><span class="dot" style="background:${it.color}"></span>${esc(it.kind === "AIRMET" ? "AIRMET" : it.kind)}</h4>
           <table>${advRows(it).map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>
           <details><summary>Full text</summary><pre>${esc(it.text)}</pre></details>
@@ -556,8 +584,8 @@
   $("panel").addEventListener("click", (e) => {
     const t = e.target.closest("button, tr");
     if (!t) return;
-    if (t.dataset.adv) {
-      state.selected = state.selected === t.dataset.adv ? null : t.dataset.adv;
+    if (t.dataset.advkey) {
+      state.selected = state.selected === t.dataset.advkey ? null : t.dataset.advkey;
       layers.highlight.clearLayers();
       render();
       const it = advisoryItems().find((x) => x.key === state.selected);
@@ -573,9 +601,23 @@
     }
   });
 
+  // "All · None" next to each product heading.
+  $("panel").addEventListener("click", (e) => {
+    const el = e.target.closest("[data-allprod]");
+    if (!el) return;
+    e.preventDefault();
+    const prod = el.dataset.allprod;
+    const keys = ADV_PRODUCTS[prod][1].map((h) => `${prod}|${h}`);
+    const turnOn = el.dataset.mode === "on";
+    keys.forEach((k) => { state.advOn[k] = turnOn; });
+    if (turnOn && !state.on.sigmets) { state.on.sigmets = true; document.querySelector('[data-layer="sigmets"]').checked = true; layers.sigmets.addTo(map); }
+    drawAdvisories();
+    render();
+  });
+
   $("panel").addEventListener("change", (e) => {
     const t = e.target;
-    if (t.dataset.advtype) state.advOn[t.dataset.advtype] = t.checked;
+    if (t.dataset.adv) state.advOn[t.dataset.adv] = t.checked;
     else if (t.dataset.gair) state.gairmetOn[t.dataset.gair] = t.checked;
     else return;
     // Turning on any advisory type also turns on its map layer.
@@ -633,6 +675,8 @@
     const res = await Promise.allSettled([loadMetars(), settle(loadAdvisories()), settle(loadPireps())]);
     res.forEach((r) => { if (r.status === "rejected") console.error(r.reason); });
     setStatus(res[0].status === "rejected" ? "METARs unavailable — try again shortly" : "");
+    const viewParam = new URLSearchParams(location.search).get("view");
+    if (["advisories", "pireps"].includes(viewParam)) { state.view = viewParam; setTabs(); }
     if (linked && state.metarIndex[linked]) selectStation(linked, true, true);
     else { if (linked) map.fitBounds(CONUS); render(); }
 
