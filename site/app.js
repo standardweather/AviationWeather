@@ -22,6 +22,19 @@
     IFR: ["#b38bff", "IFR"], MT_OBSC: ["#ff7ab8", "Mountain obscuration"], SFC_WND: ["#d2b48c", "Surface wind"],
     LLWS: ["#ffd84a", "Low-level wind shear"], M_FZLVL: ["#7cb8ff", "Multiple freezing levels"], FZLVL: ["#7cb8ff", "Freezing level"],
   };
+  // G-AIRMETs come in three series: Sierra (IFR, mountains), Tango (turbulence, wind), Zulu (icing, freezing level).
+  const GAIRMET_SERIES = {
+    SIERRA: ["Sierra", ["IFR", "MT_OBSC"]],
+    TANGO: ["Tango", ["TURB-HI", "TURB-LO", "SFC_WND", "LLWS"]],
+    ZULU: ["Zulu", ["ICE", "FZLVL", "M_FZLVL"]],
+  };
+  const SERIES_OF = Object.fromEntries(Object.entries(GAIRMET_SERIES).flatMap(([k, [, hz]]) => hz.map((h) => [h, k])));
+  // Advisory types that can be switched on and off individually: [color, on by default].
+  const ADV_TYPES = {
+    "Convective SIGMET": ["#ff4d4d", true], SIGMET: ["#ff9548", true], AIRMET: ["#ffd84a", true],
+    CWA: ["#ffffff", true], "International SIGMET": ["#ff7ab8", false],
+  };
+  const SAT = { ir: ["goes_longwave_imagery", "IR"], vis: ["goes_visible_imagery", "Visible"], wv: ["goes_water_vapor_imagery", "Water vapor"] };
   const SIGMET_COLOR = (h) => (/CONVECTIVE/.test(h) ? "#ff4d4d" : /TURB/.test(h) ? "#ff9548" : /ICE/.test(h) ? "#6fe3e8" : /ASH|VA/.test(h) ? "#c0c0c0" : "#ff7ab8");
   const INTENSITY = { NEG: 0, SMTH: 0, LGT: 1, "LGT-MOD": 2, MOD: 3, "MOD-SEV": 4, SEV: 5, EXTRM: 6 };
   const intensityColor = (i) => ["#9aa3c0", "#ffe27a", "#ffbf47", "#ff9548", "#ff6b6b", "#ff3b30", "#e65cff"][INTENSITY[i] ?? 0];
@@ -38,6 +51,8 @@
     view: "airports", station: null, metars: [], metarIndex: {}, taf: null,
     sigmets: null, isigmets: null, cwas: null, gairmets: null, gairmetOn: Object.fromEntries(Object.keys(GAIRMET).map((k) => [k, !/FZLVL/.test(k)])),
     pireps: [], tcf: null, selected: null,
+    advOn: Object.fromEntries(Object.entries(ADV_TYPES).map(([k, [, on]]) => [k, on])),
+    sat: { kind: "ir", layer: null, time: null },
     on: { metars: true, radar: true, sigmets: true, gairmets: true, pireps: true, tcf: false },
     radar: { times: [], layers: [], idx: 0, timer: null, opacity: 0.6 },
   };
@@ -49,7 +64,7 @@
   if (!linked) map.fitBounds(CONUS);
   L.control.zoom({ position: "topright" }).addTo(map);
   map.attributionControl.setPrefix("");
-  [["radar", 300], ["tcf", 340], ["gairmet", 380], ["sigmet", 420], ["highlight", 450], ["points", 620], ["labels", 640]]
+  [["sat", 260], ["radar", 300], ["tcf", 340], ["gairmet", 380], ["sigmet", 420], ["highlight", 450], ["points", 620], ["labels", 640]]
     .forEach(([n, z]) => { map.createPane(n).style.zIndex = z; });
   map.getPane("labels").style.pointerEvents = "none";
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, attribution: "Esri" }).addTo(map);
@@ -181,7 +196,7 @@
     layers.metars.clearLayers();
     for (const m of state.metars) {
       const sel = state.station === m.station_id;
-      L.circleMarker([m.lat, m.lon], { renderer: canvas, radius: sel ? 7 : dotRadius(), weight: sel ? 2 : 0.6, color: sel ? "#fff" : "#060818", fillColor: fcColor(m.flight_category), fillOpacity: 0.95 })
+      L.circleMarker([m.lat, m.lon], { renderer: canvas, bubblingMouseEvents: false, radius: sel ? 7 : dotRadius(), weight: sel ? 2 : 0.6, color: sel ? "#fff" : "#060818", fillColor: fcColor(m.flight_category), fillOpacity: 0.95 })
         .on("click", () => selectStation(m.station_id, false))
         .bindTooltip(`${m.station_id} · ${m.flight_category || "—"}`, { className: "tw-tip", direction: "top", offset: [0, -4] })
         .addTo(layers.metars);
@@ -351,9 +366,9 @@
   function drawAdvisories() {
     layers.sigmets.clearLayers(); layers.gairmets.clearLayers(); layers.tcf.clearLayers();
     for (const it of advisoryItems()) {
-      L.geoJSON(it.f, { pane: "sigmet", style: { color: it.color, weight: it.kind === "CWA" ? 1.6 : 2.2, dashArray: it.kind === "CWA" ? "5 4" : null, fillColor: it.color, fillOpacity: 0.08 } })
-        .bindTooltip(`${esc(it.kind)} · ${esc(it.hazard)}`, { className: "tw-tip", sticky: true })
-        .on("click", () => { state.view = "advisories"; state.selected = it.key; setTabs(); render(); document.querySelector(".alert.sel")?.scrollIntoView({ block: "nearest" }); })
+      if (!state.advOn[it.kind]) continue;
+      L.geoJSON(it.f, { pane: "sigmet", style: { color: it.color, weight: it.kind === "CWA" ? 1.6 : 2.2, dashArray: it.kind === "CWA" ? "5 4" : it.kind === "AIRMET" ? "8 4" : null, fillColor: it.color, fillOpacity: 0.08 } })
+        .bindTooltip(`${esc(it.kind)} · ${esc(it.hazard)} — click for details`, { className: "tw-tip", sticky: true })
         .addTo(layers.sigmets);
     }
     (state.gairmets?.features || []).forEach((f) => {
@@ -361,7 +376,7 @@
       if (!state.gairmetOn[p.hazard]) return;
       const [c, name] = GAIRMET[p.hazard] || ["#9aa3c0", p.hazard];
       L.geoJSON(f, { pane: "gairmet", style: { color: c, weight: 1.2, dashArray: /FZLVL/.test(p.hazard) ? "2 4" : null, fillColor: c, fillOpacity: 0.12 } })
-        .bindTooltip(`G-AIRMET ${esc(name)}${p.top && p.top.trim() ? ` · ${esc(p.base)}–${esc(p.top)}` : ""} · valid ${esc(String(p.validtime).slice(11, 16))}Z`, { className: "tw-tip", sticky: true })
+        .bindTooltip(`G-AIRMET ${esc(GAIRMET_SERIES[SERIES_OF[p.hazard]]?.[0] || "")} · ${esc(name)} — click for details`, { className: "tw-tip", sticky: true })
         .addTo(layers.gairmets);
     });
     (state.tcf?.features || []).forEach((f) => {
@@ -376,21 +391,113 @@
     const gfeats = state.gairmets?.features || [];
     const gcount = (h) => gfeats.filter((f) => f.properties.hazard === h).length;
     const gvalid = gfeats[0]?.properties.validtime;
-    const groups = ["Convective SIGMET", "SIGMET", "AIRMET", "CWA", "International SIGMET"];
-    let html = `<div class="pad"><h5 class="sub">G-AIRMETs${gvalid ? ` · valid ${esc(String(gvalid).slice(11, 16))}Z` : ""}</h5>
-      <div class="chips" style="padding:0">${Object.entries(GAIRMET).filter(([k]) => gcount(k)).map(([k, [c, name]]) =>
-        `<button data-gair="${k}" aria-pressed="${state.gairmetOn[k]}"><i class="dot" style="background:${c}"></i>${esc(name)}<b>${gcount(k)}</b></button>`).join("") || `<span class="note">None in effect.</span>`}</div></div>`;
-    for (const g of groups) {
+    const check = (attr, key, on, color, label, n) =>
+      `<label${n ? "" : ' style="opacity:.45"'}><input type="checkbox" ${attr}="${key}" ${on ? "checked" : ""} ${n ? "" : "disabled"} /><i class="dot" style="background:${color}"></i>${esc(label)} <b class="n">${n}</b></label>`;
+    let html = `<div class="pad"><h5 class="sub">SIGMETs and advisories</h5><div class="checks">${Object.entries(ADV_TYPES).map(([k, [c]]) =>
+      check("data-advtype", k, state.advOn[k], c, k === "AIRMET" ? "AIRMETs (text)" : `${k}s`, items.filter((i) => i.kind === k).length)).join("")}</div>`;
+    for (const [series, [name, hazards]] of Object.entries(GAIRMET_SERIES)) {
+      html += `<h5 class="sub">G-AIRMET ${name}</h5><div class="checks">${hazards.map((h) => check("data-gair", h, state.gairmetOn[h], GAIRMET[h][0], GAIRMET[h][1], gcount(h))).join("")}</div>`;
+    }
+    html += `${gvalid ? `<p class="note">G-AIRMETs valid ${esc(String(gvalid).slice(8, 10))}/${esc(String(gvalid).slice(11, 13))}${esc(String(gvalid).slice(14, 16))}Z. Click any area on the map for details.</p>` : ""}</div>`;
+    for (const g of Object.keys(ADV_TYPES)) {
       const list = items.filter((i) => i.kind === g);
-      if (!list.length) continue;
-      html += `<div class="group open"><div class="row" style="cursor:default"><i class="sw" style="background:${list[0].color}"></i><span class="name">${esc(g)}s</span><span class="num">${list.length}</span></div>
+      if (!list.length || !state.advOn[g]) continue;
+      html += `<div class="group open"><div class="row" style="cursor:default"><i class="sw" style="background:${list[0].color}"></i><span class="name">${esc(g === "AIRMET" ? "AIRMETs (text)" : `${g}s`)}</span><span class="num">${list.length}</span></div>
         ${list.map((it) => `<div class="alert${state.selected === it.key ? " sel" : ""}">
           <button class="row" data-adv="${it.key}"><span class="name">${esc(it.hazard)}${it.sev ? ` · ${esc(it.sev)}` : ""}<small>${esc(it.place || "")}</small></span><span class="num">${ddhhZ(it.from)}–${hhmmZ(it.to)}</span></button>
-          ${state.selected === it.key ? `<div class="alert__body"><pre>${esc(it.text)}</pre></div>` : ""}</div>`).join("")}</div>`;
+          ${state.selected === it.key ? `<div class="alert__body">${advDetailsTable(it)}<pre>${esc(it.text)}</pre></div>` : ""}</div>`).join("")}</div>`;
     }
     if (!items.length) html += `<p class="empty">No SIGMETs or CWAs in effect.</p>`;
     return html;
   }
+
+  // —— Advisory details (sidebar and map popups) ——————————————————————
+  const fl = (v) => { const t = String(v ?? "").trim(); return !t ? "" : /^\d+$/.test(t) ? (+t === 0 ? "SFC" : `FL${t.padStart(3, "0")}`) : t; };
+  const ftToFl = (ft) => (ft == null || ft === "" ? "" : +ft === 0 ? "SFC" : `FL${String(Math.round(+ft / 100)).padStart(3, "0")}`);
+
+  function advRows(it) {
+    const p = it.f.properties;
+    const alt = it.kind === "International SIGMET" ? [fl(p.base), fl(p.top)] : [ftToFl(p.min_ft_msl), ftToFl(p.max_ft_msl)];
+    const move = p.movement_speed_kt ? `${p.movement_dir_degrees ?? ""}° ${p.movement_speed_kt} kt` : p.spd && p.spd.trim() ? `${p.dir} ${p.spd} kt${p.chng && p.chng.trim() ? ` · ${p.chng}` : ""}` : "";
+    return [
+      ["Hazard", `${esc(it.hazard)}${it.sev && String(it.sev).trim() ? ` · ${esc(it.sev)}` : ""}`],
+      ["Valid", `${ddhhZ(it.from)} – ${ddhhZ(it.to)}`],
+      // Spell out one-sided ranges so a lone top isn't read as a single level.
+      ["Altitude", esc(alt[0] && alt[1] ? `${alt[0]} – ${alt[1]}` : alt[1] ? `up to ${alt[1]}` : alt[0] ? `${alt[0]} and above` : "")],
+      ["Movement", esc(move)],
+      ["Area", esc(it.place || "")],
+    ].filter(([, v]) => v);
+  }
+  function advDetailsTable(it) {
+    return `<dl class="kv">${advRows(it).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
+  }
+
+  function gairRows(p) {
+    const base = fl(p.base), top = fl(p.top);
+    const alt = /FZLVL/.test(p.hazard) ? (base || top ? `Freezing level ${[base, top].filter(Boolean).join(" – ")}` : "") : [base || (top ? "SFC" : ""), top].filter(Boolean).join(" – ");
+    return [
+      ["Severity", esc(String(p.severity || "").trim())],
+      ["Due to", esc(String(p.dueto || "").trim())],
+      ["Altitude", esc(alt)],
+      ["Valid", `${esc(String(p.validtime).slice(8, 10))}/${esc(String(p.validtime).slice(11, 13))}${esc(String(p.validtime).slice(14, 16))}Z (+${esc(p.forecast)} h)`],
+      ["Issued", `${esc(String(p.issuetime).slice(8, 10))}/${esc(String(p.issuetime).slice(11, 13))}${esc(String(p.issuetime).slice(14, 16))}Z`],
+    ].filter(([, v]) => v);
+  }
+
+  // Point-in-polygon for GeoJSON Polygon/MultiPolygon ([lon, lat] rings).
+  function inRing(pt, ring) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i], [xj, yj] = ring[j];
+      if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < ((xj - xi) * (pt[1] - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  function contains(geom, pt) {
+    if (!geom) return false;
+    const polys = geom.type === "Polygon" ? [geom.coordinates] : geom.type === "MultiPolygon" ? geom.coordinates : [];
+    return polys.some((rings) => inRing(pt, rings[0]) && !rings.slice(1).some((h) => inRing(pt, h)));
+  }
+
+  // Click anywhere: list every visible SIGMET, AIRMET, CWA and G-AIRMET covering that point.
+  map.on("click", (e) => {
+    const pt = [e.latlng.lng, e.latlng.lat];
+    const parts = [];
+    if (state.on.sigmets) {
+      advisoryItems().filter((it) => state.advOn[it.kind] && contains(it.f.geometry, pt)).forEach((it) => {
+        parts.push(`<h4><span class="dot" style="background:${it.color}"></span>${esc(it.kind === "AIRMET" ? "AIRMET" : it.kind)}</h4>
+          <table>${advRows(it).map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>
+          <details><summary>Full text</summary><pre>${esc(it.text)}</pre></details>
+          <p><a href="#" data-showadv="${it.key}">Show in Advisories</a></p>`);
+      });
+    }
+    if (state.on.gairmets) {
+      (state.gairmets?.features || []).filter((f) => state.gairmetOn[f.properties.hazard] && contains(f.geometry, pt)).forEach((f) => {
+        const p = f.properties;
+        const [c, name] = GAIRMET[p.hazard] || ["#9aa3c0", p.hazard];
+        parts.push(`<h4><span class="dot" style="background:${c}"></span>G-AIRMET ${esc(GAIRMET_SERIES[SERIES_OF[p.hazard]]?.[0] || p.product)} · ${esc(name)}</h4>
+          <table>${gairRows(p).map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>`);
+      });
+    }
+    if (state.on.tcf) {
+      (state.tcf?.features || []).filter((f) => +f.properties.coverage > 0 && contains(f.geometry, pt)).forEach((f) => {
+        const p = f.properties;
+        parts.push(`<h4><span class="dot" style="background:#ff7ab8"></span>Convective forecast (TCF)</h4><table><tr><td>Forecast</td><td>${esc(p.fcst_hr)} · valid ${esc(String(p.validtime).slice(9, 13))}Z</td></tr>
+          <tr><td>Confidence</td><td>${esc(p.confidnce)}</td></tr><tr><td>Tops</td><td>${esc(p.data || "")}</td></tr></table>`);
+      });
+    }
+    if (!parts.length) return;
+    L.popup({ maxWidth: 380, className: "adv-pop" }).setLatLng(e.latlng).setContent(parts.join("<hr>")).openOn(map);
+  });
+  map.on("popupopen", (e) => {
+    e.popup.getElement().querySelectorAll("[data-showadv]").forEach((a) => {
+      a.onclick = (ev) => {
+        ev.preventDefault();
+        state.view = "advisories"; state.selected = a.dataset.showadv; setTabs(); render();
+        document.querySelector(".alert.sel")?.scrollIntoView({ block: "nearest" });
+      };
+    });
+  });
 
   // —— PIREPs (turbulence, icing, wind shear) ——————————————————————————
   async function loadPireps() {
@@ -449,7 +556,6 @@
   $("panel").addEventListener("click", (e) => {
     const t = e.target.closest("button, tr");
     if (!t) return;
-    if (t.dataset.gair) { state.gairmetOn[t.dataset.gair] = !state.gairmetOn[t.dataset.gair]; drawAdvisories(); render(); return; }
     if (t.dataset.adv) {
       state.selected = state.selected === t.dataset.adv ? null : t.dataset.adv;
       layers.highlight.clearLayers();
@@ -467,6 +573,48 @@
     }
   });
 
+  $("panel").addEventListener("change", (e) => {
+    const t = e.target;
+    if (t.dataset.advtype) state.advOn[t.dataset.advtype] = t.checked;
+    else if (t.dataset.gair) state.gairmetOn[t.dataset.gair] = t.checked;
+    else return;
+    // Turning on any advisory type also turns on its map layer.
+    const layerKey = t.dataset.gair ? "gairmets" : "sigmets";
+    if (t.checked && !state.on[layerKey]) { state.on[layerKey] = true; document.querySelector(`[data-layer="${layerKey}"]`).checked = true; layers[layerKey].addTo(map); }
+    drawAdvisories();
+    render();
+  });
+
+  // —— Satellite (NOAA nowCOAST GOES, 5-minute imagery for the US domain) ——————
+  async function loadSat() {
+    const s = state.sat;
+    if (s.kind === "off") { s.layer?.remove(); s.layer = null; $("satTime").textContent = ""; return; }
+    const [name, label] = SAT[s.kind];
+    try {
+      const res = await fetch(`${NOWCOAST}/satellite/wms?service=WMS&version=1.3.0&request=GetCapabilities&_=${Math.floor(Date.now() / 120000)}`);
+      const xml = new DOMParser().parseFromString(await res.text(), "text/xml");
+      const layer = [...xml.getElementsByTagName("Layer")].find((l) => l.getElementsByTagName("Name")[0]?.textContent === name);
+      const time = [...(layer?.getElementsByTagName("Dimension") || [])].find((d) => d.getAttribute("name") === "time")?.getAttribute("default");
+      if (state.sat.kind !== s.kind || (time && time === s.time && s.layer)) return;
+      const next = L.tileLayer.wms(`${NOWCOAST}/satellite/wms`, { layers: name, format: "image/png", transparent: true, version: "1.3.0", ...(time ? { time } : {}), pane: "sat", opacity: 0.7, tileSize: 512, attribution: "" });
+      next.once("load", () => { if (s.layer && s.layer !== next) s.layer.remove(); s.layer = next; });
+      next.addTo(map);
+      if (!s.layer) s.layer = next;
+      s.time = time;
+      $("satTime").textContent = time ? `${label} ${hhmmZ(time)}` : label;
+    } catch {
+      $("satTime").textContent = "unavailable";
+    }
+  }
+  $("satpick").addEventListener("click", (e) => {
+    const k = e.target.closest("[data-sat]")?.dataset.sat;
+    if (!k) return;
+    document.querySelectorAll("#satpick [data-sat]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.sat === k));
+    state.sat.kind = k;
+    state.sat.layer?.remove(); state.sat.layer = null; state.sat.time = null;
+    loadSat();
+  });
+
   $("layers").addEventListener("change", (e) => {
     const k = e.target.dataset?.layer;
     if (!k) return;
@@ -478,6 +626,7 @@
   // —— Load & refresh ———————————————————————————————————————————————
   async function init() {
     loadRadar(true);
+    loadSat();
     setStatus("Loading aviation weather…");
     // Show advisories and PIREPs as soon as they arrive; METARs take longest.
     const settle = (pr) => pr.then(() => { if (state.view !== "airports" || !linked) render(); });
@@ -489,7 +638,7 @@
 
     setInterval(() => loadMetars().then(() => { if (state.view === "airports") render(); }).catch(() => {}), 5 * 60000);
     setInterval(() => { loadAdvisories().then(() => { if (state.view === "advisories") render(); }).catch(() => {}); loadPireps().then(() => { if (state.view === "pireps") render(); }).catch(() => {}); }, 5 * 60000);
-    setInterval(() => { if (!state.radar.timer) loadRadar(false); }, 4 * 60000);
+    setInterval(() => { if (!state.radar.timer) loadRadar(false); loadSat(); }, 4 * 60000);
   }
 
   init();
