@@ -3,3 +3,4 @@
 swim/samples/
 __pycache__/
 .venv/
+site/data/
