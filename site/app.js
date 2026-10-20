@@ -315,13 +315,13 @@
     return { raw, periods };
   }
 
-  async function selectStation(id, fly, instant) {
+  async function selectStation(id, fly, instant, keepView) {
     const m = state.metarIndex[id];
     state.station = id;
     state.taf = null;
     state.nws = null;
-    history.replaceState(null, "", `#${id}`);
-    state.view = "airports";
+    history.replaceState(null, "", `${keepView ? location.search : location.pathname}#${id}`);
+    if (!keepView) state.view = "airports";
     setTabs();
     drawMetars();
     render();
@@ -991,7 +991,7 @@
     if (["advisories", "pireps", "winds", "route"].includes(viewParam)) { state.view = viewParam; setTabs(); }
     if (viewParam === "winds") showWinds();
     if (viewParam === "route" && params.get("route")) briefRoute(params.get("route"), [25, 50, 100].includes(+params.get("w")) ? +params.get("w") : 50);
-    else if (linked && state.metarIndex[linked]) selectStation(linked, true, true);
+    else if (linked && state.metarIndex[linked]) selectStation(linked, true, true, state.view !== "airports");
     else { if (linked) map.fitBounds(CONUS); render(); }
 
     setInterval(() => loadMetars().then(() => { if (state.view === "airports") render(); }).catch(() => {}), 5 * 60000);
