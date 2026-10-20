@@ -2,7 +2,9 @@
  *
  * Everything loads live in the browser from government services that allow cross-origin requests:
  *   NOAA map services (AWC aviation layers)  METARs, TAFs, PIREPs, G-AIRMETs, SIGMETs, international SIGMETs, CWAs, TCF
- *   nowCOAST (NOAA)                          radar mosaic loop
+ *   nowCOAST (NOAA)                          radar mosaic loop, GOES satellite
+ *   NWS API (api.weather.gov)                US TAFs, each station's newest METAR and 24-hour history,
+ *                                            winds and temperatures aloft (FD bulletins)
  */
 (() => {
   "use strict";
@@ -72,7 +74,8 @@
     pireps: [], tcf: null, selected: null,
     advOn: Object.fromEntries(Object.entries(ADV_PRODUCTS).flatMap(([prod, [, hz, on]]) => hz.map((h) => [`${prod}|${h}`, on]))),
     sat: { kind: "ir", layer: null, time: null },
-    on: { metars: true, radar: true, sigmets: true, gairmets: true, pireps: true, tcf: false },
+    on: { metars: true, radar: true, sigmets: true, gairmets: true, pireps: true, tcf: false, winds: false },
+    nws: null, winds: null, windsError: false, windFcst: "6", windAlt: "9000", route: null,
     radar: { times: [], layers: [], idx: 0, timer: null, opacity: 0.6 },
   };
 
@@ -83,7 +86,7 @@
   if (!linked) map.fitBounds(CONUS);
   L.control.zoom({ position: "topright" }).addTo(map);
   map.attributionControl.setPrefix("");
-  [["sat", 260], ["radar", 300], ["tcf", 340], ["gairmet", 380], ["sigmet", 420], ["highlight", 450], ["points", 620], ["labels", 640]]
+  [["sat", 260], ["radar", 300], ["tcf", 340], ["route", 360], ["gairmet", 380], ["sigmet", 420], ["highlight", 450], ["winds", 600], ["points", 620], ["labels", 640]]
     .forEach(([n, z]) => { map.createPane(n).style.zIndex = z; });
   map.getPane("labels").style.pointerEvents = "none";
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, attribution: "Esri" }).addTo(map);
@@ -93,7 +96,7 @@
 
   const layers = {
     metars: L.layerGroup(), sigmets: L.layerGroup(), gairmets: L.layerGroup(), pireps: L.layerGroup(), tcf: L.layerGroup(),
-    highlight: L.layerGroup().addTo(map),
+    highlight: L.layerGroup().addTo(map), winds: L.layerGroup(), route: L.layerGroup().addTo(map),
   };
   Object.entries(state.on).forEach(([k, v]) => { if (v && layers[k]) layers[k].addTo(map); });
 
@@ -316,15 +319,294 @@
     const m = state.metarIndex[id];
     state.station = id;
     state.taf = null;
+    state.nws = null;
     history.replaceState(null, "", `#${id}`);
     state.view = "airports";
     setTabs();
     drawMetars();
     render();
     if (m && fly) instant ? map.setView([m.lat, m.lon], 7) : map.flyTo([m.lat, m.lon], Math.max(map.getZoom(), 7), { duration: 0.6 });
-    try { state.taf = await loadTaf(id); } catch { state.taf = null; }
-    if (state.station === id) render();
+    const [taf, nws] = await Promise.all([loadTaf(id).catch(() => null), loadNwsHistory(id).catch(() => null)]);
+    if (state.station !== id) return;
+    state.taf = taf;
+    state.nws = nws || [];
+    if (state.view === "airports" || state.view === "winds") render();
   }
+
+  // The NWS API often has a station's newest METAR before NOAA's map service, plus 24 hours of history.
+  async function loadNwsHistory(id) {
+    const start = new Date(Date.now() - 24 * 3600e3).toISOString().replace(/\.\d+Z$/, "Z");
+    const res = await fetch(`https://api.weather.gov/stations/${id}/observations?start=${start}`, { headers: { Accept: "application/geo+json" } });
+    if (!res.ok) return null;
+    const v = (q) => (q && q.value != null ? q.value : null);
+    return (await res.json()).features.map((f) => {
+      const p = f.properties;
+      const vis = v(p.visibility) == null ? null : v(p.visibility) / 1609.34;
+      const ceil = (p.cloudLayers || []).filter((c) => /BKN|OVC|VV/.test(c.amount) && c.base?.value != null).map((c) => c.base.value * 3.28084).sort((a, b) => a - b)[0];
+      return {
+        t: Date.parse(p.timestamp), raw: (p.rawMessage || "").trim(),
+        wdir: v(p.windDirection), wspd: v(p.windSpeed) == null ? null : v(p.windSpeed) / 1.852, gust: v(p.windGust) == null ? null : v(p.windGust) / 1.852,
+        vis, ceil: ceil ?? null, cat: vis == null && ceil == null ? null : category(vis == null ? null : vis.toFixed(2), ceil ?? null),
+      };
+    }).sort((a, b) => a.t - b.t);
+  }
+
+  function historyChart(obs) {
+    const pts = obs.filter((o) => o.t >= Date.now() - 24 * 3600e3);
+    if (pts.length < 3) return "";
+    const W = 336, H = 118, L0 = 26, R0 = 6, T0 = 16, B0 = 18;
+    const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+    const hi = Math.max(20, Math.ceil(Math.max(...pts.map((o) => Math.max(o.gust ?? 0, o.wspd ?? 0))) / 10) * 10);
+    const x = (t) => L0 + ((t - t0) / Math.max(1, t1 - t0)) * (W - L0 - R0);
+    const y = (vv) => T0 + (1 - vv / hi) * (H - T0 - B0);
+    const mono = 'font-family="IBM Plex Mono, monospace" font-size="9.5" fill="rgba(255,255,255,.42)"';
+    let svg = "";
+    // Flight-category strip along the top.
+    pts.forEach((o, i) => {
+      if (!o.cat) return;
+      const nx = i + 1 < pts.length ? x(pts[i + 1].t) : x(o.t) + 2;
+      svg += `<rect x="${x(o.t).toFixed(1)}" y="2" width="${Math.max(1, nx - x(o.t)).toFixed(1)}" height="8" fill="${fcColor(o.cat)}"/>`;
+    });
+    for (let vv = 0; vv <= hi; vv += hi > 40 ? 20 : 10) svg += `<line x1="${L0}" x2="${W - R0}" y1="${y(vv)}" y2="${y(vv)}" stroke="rgba(255,255,255,.07)"/><text x="${L0 - 5}" y="${y(vv) + 3}" text-anchor="end" ${mono}>${vv}</text>`;
+    for (let t = Math.ceil(t0 / 21600e3) * 21600e3; t <= t1; t += 21600e3) svg += `<text x="${x(t)}" y="${H - 4}" text-anchor="middle" ${mono}>${pad(new Date(t).getUTCHours())}Z</text>`;
+    const w = pts.filter((o) => o.wspd != null);
+    if (w.length > 1) svg += `<polyline fill="none" stroke="rgba(255,255,255,.6)" stroke-width="1.3" points="${w.map((o) => `${x(o.t).toFixed(1)},${y(o.wspd).toFixed(1)}`).join(" ")}"/>`;
+    pts.filter((o) => o.gust != null).forEach((o) => { svg += `<circle cx="${x(o.t).toFixed(1)}" cy="${y(o.gust).toFixed(1)}" r="2.2" fill="#ff9548"/>`; });
+    return `<h5 class="sub">Last 24 hours</h5><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Flight category, wind and gusts over the last 24 hours">${svg}</svg>
+      <p class="note" style="margin-top:.2rem">Top strip: flight category · <span style="color:rgba(255,255,255,.7)">line</span> wind · <span style="color:#ff9548">dots</span> gusts (kt)</p>`;
+  }
+
+  // —— Winds and temperatures aloft (NWS FD bulletins) ——————————————————————
+  const FD_ALTS = ["3000", "6000", "9000", "12000", "18000", "24000", "30000", "34000", "39000"];
+  const FD_PRODUCTS = { 6: ["FD1", "US1"], 24: ["FD3", "US3"] };   // the NWS API doesn't carry the 12-hour FD2
+  async function loadWinds() {
+    const [code, loc] = FD_PRODUCTS[state.windFcst];
+    const list = await (await fetch(`https://api.weather.gov/products/types/${code}/locations/${loc}`)).json();
+    const latest = (list["@graph"] || [])[0];
+    if (!latest) throw new Error("No winds-aloft bulletin");
+    const prod = await (await fetch(latest["@id"] || `https://api.weather.gov/products/${latest.id}`)).json();
+    state.winds = parseFd(prod.productText || "");
+    drawWinds();
+  }
+
+  /** Decode an FD bulletin. Columns end where each altitude label ends; groups are DDff, DDff±TT, or DDffTT
+   *  above 24,000 ft (temperatures negative). DD over 50 means 100 kt or more; 9900 is light and variable. */
+  function parseFd(text) {
+    const lines = text.replace(/\r/g, "").split("\n");
+    const hi = lines.findIndex((l) => /^FT\s+3000/.test(l));
+    if (hi < 0) return { stations: [] };
+    const cols = [...lines[hi].matchAll(/\d{4,5}/g)].map((m) => ({ alt: m[0], end: m.index + m[0].length }));
+    const valid = (text.match(/VALID\s+(\d{6}Z)/) || [])[1];
+    const use = (text.match(/FOR USE\s+([\d-]+Z)/) || [])[1];
+    const based = (text.match(/BASED ON\s+(\d{6}Z)/) || [])[1];
+    const stations = [];
+    for (const line of lines.slice(hi + 1)) {
+      const m = line.match(/^([A-Z0-9]{3})\s/);
+      if (!m) continue;
+      const levels = {};
+      let start = 4;
+      for (const c of cols) {
+        const g = line.slice(start, c.end).trim();
+        start = c.end;
+        if (!/^\d{4}([+-]\d{2}|\d{2})?$/.test(g)) continue;
+        let dd = +g.slice(0, 2), ff = +g.slice(2, 4);
+        const temp = g.length === 4 ? null : /[+-]/.test(g) ? +g.slice(4) : -(+g.slice(4));
+        if (dd === 99 && ff === 0) { levels[c.alt] = { lv: true, temp }; continue; }
+        if (dd > 50) { dd -= 50; ff += 100; }
+        levels[c.alt] = { dir: dd * 10, spd: ff, temp };
+      }
+      const st = state.metarIndex[`K${m[1]}`] || state.metarIndex[m[1]] || state.metarIndex[`P${m[1]}`];
+      if (st) stations.push({ id: m[1], lat: st.lat, lon: st.lon, levels });
+    }
+    return { valid, use, based, stations };
+  }
+
+  const windText = (lv) => (!lv ? "—" : lv.lv ? "Light and variable" : `${String(lv.dir).padStart(3, "0")}° ${lv.spd} kt`);
+  const tempText = (lv) => (lv?.temp != null ? `${lv.temp > 0 ? "+" : ""}${lv.temp}°C` : "—");
+  const altLabel = (a) => (+a >= 18000 ? `FL${a.slice(0, 3)}` : `${(+a).toLocaleString()} ft`);
+
+  // Standard wind barb drawn pointing into the wind: pennant 50 kt, full barb 10, half barb 5.
+  function barb(dir, spd) {
+    let n = Math.round(spd / 5) * 5, y = 0, parts = "";
+    while (n >= 50) { parts += `<path d="M0 ${y} L10 ${y + 2.5} L0 ${y + 5} Z" fill="#fff"/>`; y += 6.5; n -= 50; }
+    while (n >= 10) { parts += `<line x1="0" y1="${y}" x2="10" y2="${y - 3.5}" stroke="#fff" stroke-width="1.4"/>`; y += 3.5; n -= 10; }
+    if (n >= 5) parts += `<line x1="0" y1="${y + (y ? 0 : 3.5)}" x2="5.5" y2="${y + (y ? 0 : 3.5) - 1.9}" stroke="#fff" stroke-width="1.4"/>`;
+    return `<svg width="44" height="44" viewBox="-22 -22 44 44" style="overflow:visible"><g transform="rotate(${dir})"><line x1="0" y1="0" x2="0" y2="-20" stroke="#fff" stroke-width="1.4"/><g transform="translate(0,-20)">${parts}</g></g><circle r="2.2" fill="#4ad1ff" stroke="#060818" stroke-width=".8"/></svg>`;
+  }
+
+  function drawWinds() {
+    layers.winds.clearLayers();
+    for (const st of state.winds?.stations || []) {
+      const lv = st.levels[state.windAlt];
+      if (!lv) continue;
+      L.marker([st.lat, st.lon], {
+        pane: "winds",
+        icon: L.divIcon({ className: "", iconSize: [44, 44], iconAnchor: [22, 22], html: lv.lv ? `<svg width="44" height="44" viewBox="-22 -22 44 44"><circle r="4" fill="none" stroke="#fff" stroke-width="1.4"/></svg>` : barb(lv.dir, lv.spd) }),
+      }).bindTooltip(`${st.id} · ${altLabel(state.windAlt)} · ${windText(lv)}${lv.temp != null ? ` · ${tempText(lv)}` : ""}`, { className: "tw-tip", direction: "top", offset: [0, -6] }).addTo(layers.winds);
+    }
+    $("windAltLabel").textContent = state.winds ? altLabel(state.windAlt) : "";
+  }
+
+  function nearestFd(lat, lon) {
+    let best = null;
+    for (const st of state.winds?.stations || []) {
+      const d = Math.hypot((st.lat - lat) * 111, (st.lon - lon) * 111 * Math.cos((lat * Math.PI) / 180));
+      if (!best || d < best.d) best = { st, d };
+    }
+    return best;
+  }
+
+  function windsView() {
+    const w = state.winds;
+    const fc = Object.keys(FD_PRODUCTS).map((k) => `<button data-wfc="${k}" aria-pressed="${state.windFcst === k}">${k} h forecast</button>`).join("");
+    const alts = FD_ALTS.map((a) => `<button data-walt="${a}" aria-pressed="${state.windAlt === a}">${+a >= 18000 ? `FL${a.slice(0, 3)}` : `${+a / 1000}k`}</button>`).join("");
+    let html = `<div class="satpick" style="padding:.7rem 1.25rem 0"><span>Product</span>${fc}</div>
+      <div class="satpick" style="padding:.45rem 1.25rem 0;flex-wrap:wrap"><span>Map level</span>${alts}</div><div class="pad">`;
+    if (!w) return html + `<p class="note">${state.windsError ? "Winds aloft unavailable right now." : "Loading winds aloft…"}</p></div>`;
+    html += `<p class="note" style="margin-top:0">NWS FD forecast valid ${esc(w.valid || "—")}${w.use ? `, for use ${esc(w.use)}` : ""} · based on ${esc(w.based || "—")} data · ${w.stations.length} stations. Barbs on the map show the selected level.</p>`;
+    const ref = state.station && state.metarIndex[state.station];
+    const near = ref ? nearestFd(ref.lat, ref.lon) : null;
+    if (near) {
+      html += `<h5 class="sub">Nearest to ${esc(state.station)}: ${esc(near.st.id)} · ${Math.round(near.d / 1.852)} nm away</h5>
+        <table class="t"><thead><tr><th>Altitude</th><th>Wind</th><th>Temp</th></tr></thead><tbody>${FD_ALTS.map((a) =>
+          `<tr${a === state.windAlt ? ' style="background:rgba(74,209,255,.07)"' : ""}><td>${altLabel(a)}</td><td>${windText(near.st.levels[a])}</td><td>${tempText(near.st.levels[a])}</td></tr>`).join("")}</tbody></table>
+        <p class="note">Blank levels are within 1,500 ft of the station (no wind) or 2,500 ft (no temperature).</p>`;
+    } else {
+      html += `<p class="note">Select an airport (Airports tab or the map) to see the full column at the nearest forecast station.</p>`;
+    }
+    return html + `</div>`;
+  }
+
+  // —— Route briefing ———————————————————————————————————————————————————
+  const NM = 1.852;   // km per nautical mile
+  function routeView() {
+    const r = state.route;
+    const width = r?.nm || 50;
+    let html = `<form class="search" id="routeForm"><input id="routeQ" placeholder="Route, e.g. KMIA KATL KORD" aria-label="Route airports" autocomplete="off" value="${esc(r?.text || "")}" /><button class="btn btn--secondary">Brief</button></form>
+      <div class="satpick" style="padding:0 1.25rem"><span>Corridor</span>${[25, 50, 100].map((nm) => `<button data-cor="${nm}" aria-pressed="${width === nm}">±${nm} nm</button>`).join("")}</div>`;
+    if (!r) return html + `<p class="empty">Enter two or more airports, separated by spaces, to see METARs, TAFs, advisories, PIREPs and winds aloft along the route.</p>`;
+    if (r.error) return html + `<p class="empty">${esc(r.error)}</p>`;
+    const cats = Object.fromEntries(Object.keys(FC).map((k) => [k, r.metars.filter((m) => m.flight_category === k).length]));
+    const lowCat = r.metars.filter((m) => /IFR/.test(m.flight_category || ""));
+    html += `<div class="pad"><h5 class="sub">${esc(r.ids.join(" → "))} · ${Math.round(r.lengthKm / NM).toLocaleString()} nm</h5>
+      <table class="t"><thead><tr><th>Airport</th><th>Now</th><th>Worst in TAF, next 12 h</th></tr></thead><tbody>${r.points.map((pt) => {
+        const m = state.metarIndex[pt.id];
+        const worst = pt.taf ? worstTaf(pt.taf, 12) : null;
+        return `<tr data-ll="${pt.lat},${pt.lon}"><td><b style="color:#fff">${esc(pt.id)}</b><small>${m ? `METAR ${hhmmZ(m.observation_time)}` : ""}</small></td>
+          <td><span class="fc" style="background:${fcColor(m?.flight_category)}">${esc(m?.flight_category || "—")}</span><small>${m ? (m.wind_speed_kt === 0 ? "Calm" : `${m.winddir ?? "VRB"}° ${m.wind_speed_kt}${m.wind_gust_kt ? `G${m.wind_gust_kt}` : ""} kt`) : ""}</small></td>
+          <td>${worst ? `<span class="fc" style="background:${fcColor(worst.cat)}">${worst.cat}</span><small>from ${ddhhZ(Math.max(worst.from, Date.now()))}${worst.wx ? ` · ${esc(worst.wx)}` : ""}</small>` : pt.taf === null ? "No TAF" : "Loading…"}</td></tr>`;
+      }).join("")}</tbody></table>
+      <h5 class="sub">METARs within ±${r.nm} nm · ${r.metars.length}</h5>
+      <div class="counts">${Object.entries(FC).map(([k, c]) => `<div style="color:${c}">${cats[k]}<small>${k}</small></div>`).join("")}</div>
+      ${lowCat.length ? `<table class="t"><tbody>${lowCat.slice(0, 20).map((m) => `<tr data-ll="${m.lat},${m.lon}"><td><b style="color:#fff">${esc(m.station_id)}</b><small>${Math.round(m.along / NM)} nm along</small></td>
+        <td><span class="fc" style="background:${fcColor(m.flight_category)}">${esc(m.flight_category)}</span><small>${m.ceiling_ft ? `ceiling ${m.ceiling_ft.toLocaleString()} ft · ` : ""}${esc(m.visibility_statute_mi ?? "—")} sm${m.wx_string ? ` · ${esc(m.wx_string)}` : ""}</small></td></tr>`).join("")}</tbody></table>` : ""}
+      <h5 class="sub">Advisories crossing the route · ${r.advisories.length}</h5>
+      ${r.advisories.map((a) => `<p class="note" style="margin:.2rem 0"><i class="dot" style="background:${a.color}"></i><b style="color:#fff">${esc(a.title)}</b><br>${esc(a.detail)}</p>`).join("") || `<p class="note">None of the advisories shown on the map cross the corridor.</p>`}
+      <h5 class="sub">PIREPs in the corridor, moderate or greater · ${r.pireps.length}</h5>
+      ${r.pireps.length ? `<table class="t"><tbody>${r.pireps.slice(0, 20).map((p) => `<tr data-ll="${p.lat},${p.lon}"><td>${hhmmZ(p.observation_time)}</td><td>${p.kind === "ice" ? "Icing" : p.kind === "llws" ? "Wind shear" : "Turbulence"} ${esc(pirepIntensity(p) || "")}<small>${esc(p.aircraft_ref || "")} · ${p.altitude_ft_msl ? ftToFl(p.altitude_ft_msl) : "FL?"}</small></td></tr>`).join("")}</tbody></table>` : `<p class="note">None reported.</p>`}
+      <h5 class="sub">Winds aloft along the route · ${altLabel(state.windAlt)}</h5>
+      ${r.winds.length ? `<p class="note" style="margin-top:0;font-family:var(--mono)">${r.winds.map((w) => `${esc(w.id)} ${w.lv.lv ? "LV" : `${String(w.lv.dir).padStart(3, "0")}/${w.lv.spd}`}`).join(" · ")}</p><p class="note">Change the level in the Winds aloft tab.</p>` : `<p class="note">${state.winds ? "No forecast stations in the corridor at this level." : "Loading…"}</p>`}
+      </div>`;
+    return html;
+  }
+
+  function worstTaf(taf, hours) {
+    const now = Date.now(), end = now + hours * 3600e3;
+    const order = ["VFR", "MVFR", "IFR", "LIFR"];
+    // A period applies until the next prevailing (FM or initial) group begins.
+    return taf.periods.filter((p, i) => {
+      const next = taf.periods.slice(i + 1).find((q) => q.type === "FM" || q.type === "Initial");
+      return p.from <= end && (next ? next.from : Infinity) > now;
+    }).reduce((w, p) => (!w || order.indexOf(p.cat) > order.indexOf(w.cat) ? p : w), null);
+  }
+
+  // Distance (km) from a point to the route polyline, and how far along the route the closest point lies.
+  function routeDistance(route, lat, lon) {
+    const kx = Math.cos((lat * Math.PI) / 180) * 111.32, ky = 110.57;
+    let best = { d: Infinity, along: 0 }, acc = 0;
+    for (let i = 0; i + 1 < route.length; i++) {
+      const a = route[i], b = route[i + 1];
+      const ax = (a.lon - lon) * kx, ay = (a.lat - lat) * ky, bx = (b.lon - lon) * kx, by = (b.lat - lat) * ky;
+      const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy);
+      const t = len ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / (len * len))) : 0;
+      const d = Math.hypot(ax + t * dx, ay + t * dy);
+      if (d < best.d) best = { d, along: acc + t * len };
+      acc += len;
+    }
+    best.total = acc;
+    return best;
+  }
+
+  function parseRoute(text) {
+    return text.toUpperCase().split(/[\s,>]+|-(?=\w)/).filter(Boolean)
+      .map((id) => (/^[A-Z0-9]{3}$/.test(id) && state.metarIndex[`K${id}`] ? `K${id}` : id));
+  }
+
+  async function briefRoute(text, nm) {
+    const ids = parseRoute(text);
+    const points = ids.map((id) => (state.metarIndex[id] ? { id, lat: state.metarIndex[id].lat, lon: state.metarIndex[id].lon, taf: undefined } : null));
+    const missing = ids.filter((id, i) => !points[i]);
+    history.replaceState(null, "", `?view=route&route=${encodeURIComponent(ids.join(" "))}&w=${nm}`);
+    layers.route.clearLayers();
+    if (ids.length < 2 || missing.length) {
+      state.route = { text, nm, error: ids.length < 2 ? "Enter at least two airports." : `No current METAR for ${missing.join(", ")}, so its position isn't known. Use ICAO identifiers such as KATL.` };
+      render();
+      return;
+    }
+    const km = nm * NM;
+    const lengthKm = routeDistance(points, points[0].lat, points[0].lon).total;
+    const metars = state.metars.map((m) => ({ ...m, ...routeDistance(points, m.lat, m.lon) })).filter((m) => m.d <= km).sort((a, b) => a.along - b.along);
+    // An advisory crosses the corridor if the route passes through it or any of its vertices lies in the corridor.
+    const samples = [];
+    for (let i = 0; i + 1 < points.length; i++) for (let f = 0; f <= 1; f += 0.02) samples.push([points[i].lon + (points[i + 1].lon - points[i].lon) * f, points[i].lat + (points[i + 1].lat - points[i].lat) * f]);
+    const crosses = (geom) => {
+      if (!geom) return false;
+      if (samples.some((pt) => contains(geom, pt))) return true;
+      const rings = geom.type === "Polygon" ? geom.coordinates : geom.type === "MultiPolygon" ? geom.coordinates.flat() : geom.type === "LineString" ? [geom.coordinates] : [];
+      return rings.some((ring) => ring.some(([x, y]) => routeDistance(points, y, x).d <= km));
+    };
+    const plain = (s) => String(s).replace(/<[^>]+>/g, "").replace(/&amp;/g, "&");
+    const advisories = [];
+    if (state.on.sigmets) advisoryItems().filter((it) => shown(it) && crosses(it.f.geometry)).forEach((it) => {
+      advisories.push({ title: `${it.kind} · ${it.hazard}`, color: it.color, detail: advRows(it).filter(([k]) => k !== "Hazard").map(([k, v]) => `${k} ${plain(v)}`).join(" · ") });
+    });
+    if (state.on.gairmets) (state.gairmets?.features || []).filter((f) => state.gairmetOn[f.properties.hazard] && crosses(f.geometry)).forEach((f) => {
+      const p = f.properties;
+      const [c, name] = GAIRMET[p.hazard] || ["#9aa3c0", p.hazard];
+      advisories.push({ title: `G-AIRMET ${GAIRMET_SERIES[SERIES_OF[p.hazard]]?.[0] || ""} · ${name} (+${p.forecast} h)`, color: c, detail: gairRows(p).filter(([k]) => k !== "Issued").map(([k, v]) => `${k} ${plain(v)}`).join(" · ") });
+    });
+    const pireps = state.pireps.filter((p) => (p.kind === "llws" || (INTENSITY[pirepIntensity(p)] ?? 0) >= 3) && routeDistance(points, p.lat, p.lon).d <= km);
+    state.route = { text: ids.join(" "), nm, ids, points, lengthKm, metars, advisories, pireps, get winds() { return routeWinds(points, km); } };
+
+    const line = points.map((pt) => [pt.lat, pt.lon]);
+    const corridor = Math.max(4, (km * 1000) / (40075016 * Math.cos((points[0].lat * Math.PI) / 180) / 2 ** (map.getZoom() + 8)) * 2);
+    L.polyline(line, { pane: "route", color: "#4ad1ff", weight: corridor, opacity: 0.1, lineCap: "round", lineJoin: "round", interactive: false, className: "corridor" }).addTo(layers.route);
+    L.polyline(line, { pane: "route", color: "#4ad1ff", weight: 2.5, opacity: 0.95, interactive: false }).addTo(layers.route);
+    points.forEach((pt) => L.circleMarker([pt.lat, pt.lon], { pane: "route", radius: 5, color: "#fff", weight: 2, fillColor: "#4ad1ff", fillOpacity: 1, interactive: false })
+      .bindTooltip(pt.id, { permanent: true, direction: "right", offset: [8, 0], className: "tw-label" }).addTo(layers.route));
+    state.view = "route";
+    setTabs();
+    render();
+    map.fitBounds(L.latLngBounds(line).pad(0.15), { animate: false });
+    await Promise.all(points.map(async (pt) => { pt.taf = await loadTaf(pt.id).catch(() => null); if (state.view === "route" && state.route?.points === points) render(); }));
+  }
+
+  function routeWinds(points, km) {
+    return (state.winds?.stations || []).map((w) => ({ ...w, ...routeDistance(points, w.lat, w.lon), lv: w.levels[state.windAlt] }))
+      .filter((w) => w.d <= km && w.lv).sort((a, b) => a.along - b.along);
+  }
+
+  // Keep the corridor band the right width in pixels as the map zooms.
+  map.on("zoomend", () => {
+    const r = state.route;
+    if (!r?.points) return;
+    layers.route.eachLayer((l) => {
+      if (l.options.className !== "corridor") return;
+      const km = r.nm * NM;
+      l.setStyle({ weight: Math.max(4, (km * 1000) / (40075016 * Math.cos((r.points[0].lat * Math.PI) / 180) / 2 ** (map.getZoom() + 8)) * 2) });
+    });
+  });
+
 
   function airportsView() {
     const counts = Object.fromEntries(Object.keys(FC).map((k) => [k, state.metars.filter((m) => m.flight_category === k).length]));
@@ -334,14 +616,19 @@
       <div class="counts">${Object.entries(FC).map(([k, c]) => `<div style="color:${c}">${counts[k]}<small>${k}</small></div>`).join("")}</div>`;
     if (state.station && !m) html += `<p class="note">No current METAR for <b>${esc(state.station)}</b>.</p>`;
     if (m) {
+      // Show the NWS API's report when it's newer than the map service's (the decoded fields stay from AWC).
+      const latest = (state.nws || []).filter((o) => o.raw).slice(-1)[0];
+      const newer = latest && latest.t > m.observation_time + 60000 ? latest : null;
       const wind = m.wind_speed_kt === 0 ? "Calm" : `${m.winddir ?? "VRB"}° ${m.wind_speed_kt}${m.wind_gust_kt ? ` gust ${m.wind_gust_kt}` : ""} kt`;
-      html += `<h5 class="sub">${esc(m.station_id)} · METAR ${ddhhZ(m.observation_time)} · ${ago(m.observation_time)}</h5>
-        <div class="raw">${esc(m.raw_text)}</div>
+      html += `<h5 class="sub">${esc(m.station_id)} · METAR ${ddhhZ(newer ? newer.t : m.observation_time)} · ${ago(newer ? newer.t : m.observation_time)}</h5>
+        <div class="raw">${esc(newer ? newer.raw : m.raw_text)}</div>
+        ${newer ? `<p class="note" style="margin:.3rem 0 0">Newest report from the NWS API; the decoded values below are from ${hhmmZ(m.observation_time)}.</p>` : ""}
         <dl class="kv"><dt>Category</dt><dd><span class="fc" style="background:${fcColor(m.flight_category)}">${esc(m.flight_category || "—")}</span></dd>
           <dt>Wind</dt><dd>${esc(wind)}</dd><dt>Visibility</dt><dd>${esc(m.visibility_statute_mi ?? "—")} sm</dd>
           <dt>Ceiling</dt><dd>${m.ceiling_ft ? `${m.ceiling_ft.toLocaleString()} ft` : m.vert_vis_ft ? `VV ${m.vert_vis_ft} ft` : "None"}</dd>
           <dt>Weather</dt><dd>${esc(m.wx_string || "—")}</dd><dt>Temp / dew</dt><dd>${m.temp_c ?? "—"}° / ${m.dewpoint_c ?? "—"}° C</dd>
           <dt>Altimeter</dt><dd>${m.altim_in_hg ? `${m.altim_in_hg.toFixed(2)} inHg` : "—"}</dd></dl>`;
+      if (state.nws) html += historyChart(state.nws);
       const t = state.taf;
       if (t) {
         html += `<h5 class="sub">TAF</h5><table class="t"><thead><tr><th>From</th><th>Wind</th><th>Vis / ceiling</th><th></th></tr></thead><tbody>${t.periods.map((p) =>
@@ -569,11 +856,21 @@
   // —— Sidebar ——————————————————————————————————————————————————————
   function setTabs() { document.querySelectorAll("#views button").forEach((b) => b.setAttribute("aria-selected", b.dataset.view === state.view)); }
   function render() {
-    $("panel").innerHTML = state.view === "airports" ? airportsView() : state.view === "advisories" ? advisoriesView() : pirepsView();
+    const views = { airports: airportsView, route: routeView, advisories: advisoriesView, pireps: pirepsView, winds: windsView };
+    $("panel").innerHTML = (views[state.view] || airportsView)();
   }
-  $("views").addEventListener("click", (e) => { const v = e.target.closest("[data-view]")?.dataset.view; if (v) { state.view = v; setTabs(); render(); } });
+  $("views").addEventListener("click", (e) => { const v = e.target.closest("[data-view]")?.dataset.view; if (v) { state.view = v; setTabs(); render(); if (v === "winds") showWinds(); } });
+
+  // Opening the Winds aloft tab turns on the barbs.
+  function showWinds() {
+    if (state.on.winds) return;
+    state.on.winds = true;
+    document.querySelector('[data-layer="winds"]').checked = true;
+    layers.winds.addTo(map);
+  }
 
   $("panel").addEventListener("submit", (e) => {
+    if (e.target.id === "routeForm") { e.preventDefault(); briefRoute($("routeQ").value, state.route?.nm || 50); return; }
     if (e.target.id !== "search") return;
     e.preventDefault();
     let id = $("q").value.trim().toUpperCase();
@@ -584,6 +881,17 @@
   $("panel").addEventListener("click", (e) => {
     const t = e.target.closest("button, tr");
     if (!t) return;
+    if (t.dataset.cor) {
+      const text = state.route?.text || $("routeQ").value;
+      if (text.trim()) briefRoute(text, +t.dataset.cor); else { state.route = null; render(); }
+      return;
+    }
+    if (t.dataset.wfc && t.dataset.wfc !== state.windFcst) {
+      state.windFcst = t.dataset.wfc; state.winds = null; render();
+      loadWinds().then(render).catch(() => { state.windsError = true; render(); });
+      return;
+    }
+    if (t.dataset.walt) { state.windAlt = t.dataset.walt; showWinds(); drawWinds(); render(); return; }
     if (t.dataset.advkey) {
       state.selected = state.selected === t.dataset.advkey ? null : t.dataset.advkey;
       layers.highlight.clearLayers();
@@ -662,6 +970,7 @@
     if (!k) return;
     state.on[k] = e.target.checked;
     if (k === "radar") { loadRadar(true); return; }
+    if (k === "winds" && e.target.checked && !state.winds) loadWinds().catch(() => {});
     e.target.checked ? layers[k].addTo(map) : layers[k].remove();
   });
 
@@ -673,16 +982,22 @@
     // Show advisories and PIREPs as soon as they arrive; METARs take longest.
     const settle = (pr) => pr.then(() => { if (state.view !== "airports" || !linked) render(); });
     const res = await Promise.allSettled([loadMetars(), settle(loadAdvisories()), settle(loadPireps())]);
+    // Winds aloft need METAR positions for the FD station identifiers.
+    loadWinds().then(() => { if (["winds", "route"].includes(state.view)) render(); }).catch(() => { state.windsError = true; if (state.view === "winds") render(); });
     res.forEach((r) => { if (r.status === "rejected") console.error(r.reason); });
     setStatus(res[0].status === "rejected" ? "METARs unavailable — try again shortly" : "");
-    const viewParam = new URLSearchParams(location.search).get("view");
-    if (["advisories", "pireps"].includes(viewParam)) { state.view = viewParam; setTabs(); }
-    if (linked && state.metarIndex[linked]) selectStation(linked, true, true);
+    const params = new URLSearchParams(location.search);
+    const viewParam = params.get("view");
+    if (["advisories", "pireps", "winds", "route"].includes(viewParam)) { state.view = viewParam; setTabs(); }
+    if (viewParam === "winds") showWinds();
+    if (viewParam === "route" && params.get("route")) briefRoute(params.get("route"), [25, 50, 100].includes(+params.get("w")) ? +params.get("w") : 50);
+    else if (linked && state.metarIndex[linked]) selectStation(linked, true, true);
     else { if (linked) map.fitBounds(CONUS); render(); }
 
     setInterval(() => loadMetars().then(() => { if (state.view === "airports") render(); }).catch(() => {}), 5 * 60000);
     setInterval(() => { loadAdvisories().then(() => { if (state.view === "advisories") render(); }).catch(() => {}); loadPireps().then(() => { if (state.view === "pireps") render(); }).catch(() => {}); }, 5 * 60000);
     setInterval(() => { if (!state.radar.timer) loadRadar(false); loadSat(); }, 4 * 60000);
+    setInterval(() => loadWinds().then(() => { if (state.view === "winds") render(); }).catch(() => {}), 30 * 60000);
   }
 
   init();

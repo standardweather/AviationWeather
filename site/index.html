@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AviationWeather | Standard Weather</title>
-  <meta name="description" content="AviationWeather — live METAR flight categories, TAFs, SIGMETs, G-AIRMETs, CWAs, PIREPs and radar from the Aviation Weather Center." />
+  <meta name="description" content="AviationWeather — live METAR flight categories and history, TAFs, route briefings, winds aloft, SIGMETs, G-AIRMETs, CWAs, PIREPs and radar from the Aviation Weather Center." />
   <meta name="theme-color" content="#070914" />
   <link rel="canonical" href="https://standardweather.github.io/AviationWeather/" />
   <meta property="og:type" content="website" />
@@ -54,8 +54,10 @@
       <div class="side__head"><h1><span>Aviation</span>Weather</h1><time id="updated"></time></div>
       <div class="tabs" role="tablist" aria-label="View" id="views">
         <button role="tab" data-view="airports" aria-selected="true">Airports</button>
+        <button role="tab" data-view="route" aria-selected="false">Route</button>
         <button role="tab" data-view="advisories" aria-selected="false">Advisories</button>
         <button role="tab" data-view="pireps" aria-selected="false">PIREPs</button>
+        <button role="tab" data-view="winds" aria-selected="false">Winds aloft</button>
       </div>
       <div class="scroll" id="panel"><p class="empty">Loading…</p></div>
       <div class="side__foot">
@@ -67,6 +69,7 @@
           <label><input type="checkbox" data-layer="gairmets" checked /> G-AIRMETs</label>
           <label><input type="checkbox" data-layer="pireps" checked /> PIREPs</label>
           <label><input type="checkbox" data-layer="tcf" /> Convective fcst (TCF)</label>
+          <label><input type="checkbox" data-layer="winds" /> Winds aloft <small id="windAltLabel" style="color:var(--text3)"></small></label>
         </div>
         <div class="satpick" id="satpick" role="group" aria-label="Satellite">
           <span>Satellite</span>
@@ -97,6 +100,6 @@
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>
