@@ -5,6 +5,9 @@
  *   nowCOAST (NOAA)                          radar mosaic loop, GOES satellite
  *   NWS API (api.weather.gov)                US TAFs, each station's newest METAR and 24-hour history,
  *                                            winds and temperatures aloft (FD bulletins)
+ * Collected by GitHub Actions into data/ (tools/collect.py), because these sources send no CORS headers:
+ *   FAA TFR list and shapes (tfr.json), OurAirports field elevations and runways (airports.json)
+ * From FutureWeather (same site): GFS-derived turbulence and icing overlays for the hour nearest now
  */
 (() => {
   "use strict";
@@ -74,7 +77,8 @@
     pireps: [], tcf: null, selected: null,
     advOn: Object.fromEntries(Object.entries(ADV_PRODUCTS).flatMap(([prod, [, hz, on]]) => hz.map((h) => [`${prod}|${h}`, on]))),
     sat: { kind: "ir", layer: null, time: null },
-    on: { metars: true, radar: true, sigmets: true, gairmets: true, pireps: true, tcf: false, winds: false },
+    on: { metars: true, radar: true, sigmets: true, gairmets: true, pireps: true, tcf: false, winds: false, tfr: true },
+    tfr: null, airports: null, hazard: "off",
     nws: null, winds: null, windsError: false, windFcst: "6", windAlt: "9000", route: null,
     radar: { times: [], layers: [], idx: 0, timer: null, opacity: 0.6 },
   };
@@ -86,7 +90,7 @@
   if (!linked) map.fitBounds(CONUS);
   L.control.zoom({ position: "topright" }).addTo(map);
   map.attributionControl.setPrefix("");
-  [["sat", 260], ["radar", 300], ["tcf", 340], ["route", 360], ["gairmet", 380], ["sigmet", 420], ["highlight", 450], ["winds", 600], ["points", 620], ["labels", 640]]
+  [["sat", 260], ["radar", 300], ["hazard", 320], ["tcf", 340], ["tfr", 350], ["route", 360], ["gairmet", 380], ["sigmet", 420], ["highlight", 450], ["winds", 600], ["points", 620], ["labels", 640]]
     .forEach(([n, z]) => { map.createPane(n).style.zIndex = z; });
   map.getPane("labels").style.pointerEvents = "none";
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, attribution: "Esri" }).addTo(map);
@@ -97,6 +101,7 @@
   const layers = {
     metars: L.layerGroup(), sigmets: L.layerGroup(), gairmets: L.layerGroup(), pireps: L.layerGroup(), tcf: L.layerGroup(),
     highlight: L.layerGroup().addTo(map), winds: L.layerGroup(), route: L.layerGroup().addTo(map),
+    tfr: L.layerGroup(), hazard: L.layerGroup().addTo(map),
   };
   Object.entries(state.on).forEach(([k, v]) => { if (v && layers[k]) layers[k].addTo(map); });
 
@@ -627,7 +632,8 @@
           <dt>Wind</dt><dd>${esc(wind)}</dd><dt>Visibility</dt><dd>${esc(m.visibility_statute_mi ?? "—")} sm</dd>
           <dt>Ceiling</dt><dd>${m.ceiling_ft ? `${m.ceiling_ft.toLocaleString()} ft` : m.vert_vis_ft ? `VV ${m.vert_vis_ft} ft` : "None"}</dd>
           <dt>Weather</dt><dd>${esc(m.wx_string || "—")}</dd><dt>Temp / dew</dt><dd>${m.temp_c ?? "—"}° / ${m.dewpoint_c ?? "—"}° C</dd>
-          <dt>Altimeter</dt><dd>${m.altim_in_hg ? `${m.altim_in_hg.toFixed(2)} inHg` : "—"}</dd></dl>`;
+          <dt>Altimeter</dt><dd>${m.altim_in_hg ? `${m.altim_in_hg.toFixed(2)} inHg` : "—"}</dd>
+          ${performanceRows(m)}</dl>`;
       if (state.nws) html += historyChart(state.nws);
       const t = state.taf;
       if (t) {
@@ -642,6 +648,87 @@
     }
     return html + `</div>`;
   }
+
+  // —— Density altitude and crosswinds (field data from data/airports.json) ——————————————
+  async function loadAirports() {
+    if (!state.airports) state.airports = fetch("data/airports.json").then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
+    return state.airports;
+  }
+  function performanceRows(m) {
+    const ap = state.airportsData?.[m.station_id];
+    if (!ap) { if (!state.airportsData) loadAirports().then((d) => { state.airportsData = d; if (state.view === "airports") render(); }); return ""; }
+    const [elev, rwys] = ap;
+    let html = "";
+    if (elev != null && m.altim_in_hg && m.temp_c != null) {
+      const pa = elev + (29.92 - m.altim_in_hg) * 1000;
+      const da = pa + 120 * (m.temp_c - (15 - 2 * (pa / 1000)));
+      html += `<dt>Density alt.</dt><dd>${(Math.round(da / 10) * 10).toLocaleString()} ft<small style="display:block;color:var(--text3)">Field ${Math.round(elev).toLocaleString()} ft · pressure alt. ${(Math.round(pa / 10) * 10).toLocaleString()} ft</small></dd>`;
+    }
+    const dir = typeof m.winddir === "number" ? m.winddir : Number.isFinite(+m.winddir) ? +m.winddir : null;
+    if (rwys.length && m.wind_speed_kt != null) {
+      if (m.wind_speed_kt === 0) html += `<dt>Runway wind</dt><dd>Calm</dd>`;
+      else if (dir == null) html += `<dt>Runway wind</dt><dd>Variable, up to ${m.wind_gust_kt || m.wind_speed_kt} kt from any direction</dd>`;
+      else {
+        // Each runway end, scored by headwind; show the best one and its crosswind (with gusts).
+        const ends = rwys.flatMap(([a, b, hdg, len]) => [[a, hdg, len], [b, (hdg + 180) % 360, len]]).filter(([id]) => id);
+        const comp = (hdg, spd) => { const r = ((dir - hdg) * Math.PI) / 180; return { head: spd * Math.cos(r), cross: spd * Math.sin(r) }; };
+        const rows = ends.map(([id, hdg, len]) => ({ id, len, ...comp(hdg, m.wind_speed_kt), gx: m.wind_gust_kt ? comp(hdg, m.wind_gust_kt).cross : null }))
+          .sort((a, b) => b.head - a.head);
+        const side = (c) => (Math.abs(c) < 0.5 ? "" : c > 0 ? " from the right" : " from the left");
+        const fmt = (r) => `Rwy ${esc(r.id)}: ${Math.round(Math.abs(r.cross))} kt crosswind${side(r.cross)}${r.gx != null ? ` (gusts ${Math.round(Math.abs(r.gx))})` : ""}, ${r.head >= 0 ? `${Math.round(r.head)} kt headwind` : `${Math.round(-r.head)} kt tailwind`}`;
+        html += `<dt>Runway wind</dt><dd>${fmt(rows[0])}${rows.slice(1, 3).map((r) => `<small style="display:block;color:var(--text3)">${fmt(r)}</small>`).join("")}</dd>`;
+      }
+    }
+    return html;
+  }
+
+  // —— TFRs (FAA, collected into data/tfr.json) ——————————————————————————————
+  const TFR_COLOR = "#ff4d4d";
+  async function loadTfrs() {
+    const res = await fetch(`data/tfr.json?t=${Math.floor(Date.now() / 300000)}`);
+    if (!res.ok) return;
+    state.tfr = await res.json();
+    layers.tfr.clearLayers();
+    L.geoJSON(state.tfr, {
+      pane: "tfr",
+      style: (f) => ({ color: /SECURITY/i.test(f.properties.type) ? TFR_COLOR : "#ff9548", weight: 1.6, fillOpacity: 0.12 }),
+      onEachFeature: (f, l) => {
+        const p = f.properties;
+        l.bindTooltip(`TFR ${esc(p.id)} · ${esc(p.type)}`, { className: "tw-tip", sticky: true })
+          .bindPopup(`<h4>TFR ${esc(p.id)} · ${esc(p.type)}</h4><p>${esc(p.title)}</p><p>${esc(p.facility)}${p.state ? ` · ${esc(p.state)}` : ""} · <a href="${esc(p.link)}" target="_blank" rel="noopener">FAA details and altitudes ↗</a></p>`);
+      },
+    }).addTo(layers.tfr);
+  }
+
+  // —— Model turbulence and icing (GFS overlays drawn for FutureWeather) ——————————————
+  const HAZARD = { turb: "Turbulence (Ellrod TI2, FL240–FL390)", icing: "Icing potential (900–400 mb)" };
+  let fw = null;
+  async function drawHazard() {
+    layers.hazard.clearLayers();
+    const legendEl = $("hazLegend");
+    if (state.hazard === "off") { if (legendEl) legendEl.innerHTML = ""; return; }
+    fw ||= fetch(`/FutureWeather/data.json?t=${Math.floor(Date.now() / 600000)}`).then((r) => r.json()).catch(() => null);
+    const info = await fw;
+    const gfs = info?.models.find((m) => m.id === "gfs");
+    const prod = gfs?.products.find((p) => p.id === state.hazard);
+    if (!gfs || !prod) { legendEl.innerHTML = `<h5 class="sub">${HAZARD[state.hazard]} · unavailable</h5>`; return; }
+    const t0 = new Date(gfs.init).getTime();
+    const fhr = gfs.hours.reduce((b, h) => (Math.abs(t0 + h * 3600e3 - Date.now()) < Math.abs(t0 + b * 3600e3 - Date.now()) ? h : b), gfs.hours[0]);
+    L.imageOverlay(`/FutureWeather/img/gfs/${state.hazard}_f${String(fhr).padStart(3, "0")}.png?run=${encodeURIComponent(gfs.cycle)}`, info.bounds, { pane: "hazard", opacity: 0.7, interactive: false }).addTo(layers.hazard);
+    const lg = prod.legend;
+    legendEl.innerHTML = `<h5 class="sub">${HAZARD[state.hazard]} · GFS ${hhmmZ(t0)} F${String(fhr).padStart(3, "0")}, valid ${ddhhZ(t0 + fhr * 3600e3)}</h5>
+      <div class="key">${lg.colors.map((c, i) => `<span><i style="background:${c}"></i>${i === 0 ? "light" : i === lg.colors.length - 1 ? "severe" : ""}</span>`).join("")}</div>
+      <p class="note" style="margin:.25rem 0 0">Model estimate, not an AWC product. <a href="/FutureWeather/?model=gfs&amp;product=${state.hazard}">Loop it in FutureWeather</a></p>`;
+  }
+  const HazLegend = L.Control.extend({ options: { position: "bottomright" }, onAdd() { const d = L.DomUtil.create("div", "maplegend"); d.id = "hazLegend"; return d; } });
+  new HazLegend().addTo(map);
+  $("hazpick").addEventListener("click", (e) => {
+    const v = e.target.closest("[data-haz]")?.dataset.haz;
+    if (!v) return;
+    state.hazard = v;
+    document.querySelectorAll("#hazpick [data-haz]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.haz === v));
+    drawHazard();
+  });
 
   // —— Advisories ——————————————————————————————————————————————————
   async function loadAdvisories() {
@@ -981,6 +1068,7 @@
     setStatus("Loading aviation weather…");
     // Show advisories and PIREPs as soon as they arrive; METARs take longest.
     const settle = (pr) => pr.then(() => { if (state.view !== "airports" || !linked) render(); });
+    loadTfrs().catch(() => {});
     const res = await Promise.allSettled([loadMetars(), settle(loadAdvisories()), settle(loadPireps())]);
     // Winds aloft need METAR positions for the FD station identifiers.
     loadWinds().then(() => { if (["winds", "route"].includes(state.view)) render(); }).catch(() => { state.windsError = true; if (state.view === "winds") render(); });
@@ -995,6 +1083,8 @@
     else { if (linked) map.fitBounds(CONUS); render(); }
 
     setInterval(() => loadMetars().then(() => { if (state.view === "airports") render(); }).catch(() => {}), 5 * 60000);
+    setInterval(() => loadTfrs().catch(() => {}), 15 * 60000);
+    setInterval(() => { fw = null; if (state.hazard !== "off") drawHazard(); }, 30 * 60000);
     setInterval(() => { loadAdvisories().then(() => { if (state.view === "advisories") render(); }).catch(() => {}); loadPireps().then(() => { if (state.view === "pireps") render(); }).catch(() => {}); }, 5 * 60000);
     setInterval(() => { if (!state.radar.timer) loadRadar(false); loadSat(); }, 4 * 60000);
     setInterval(() => loadWinds().then(() => { if (state.view === "winds") render(); }).catch(() => {}), 30 * 60000);

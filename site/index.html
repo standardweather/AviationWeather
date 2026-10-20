@@ -70,6 +70,13 @@
           <label><input type="checkbox" data-layer="pireps" checked /> PIREPs</label>
           <label><input type="checkbox" data-layer="tcf" /> Convective fcst (TCF)</label>
           <label><input type="checkbox" data-layer="winds" /> Winds aloft <small id="windAltLabel" style="color:var(--text3)"></small></label>
+          <label><input type="checkbox" data-layer="tfr" checked /> TFRs</label>
+        </div>
+        <div class="satpick" id="hazpick" role="group" aria-label="Model turbulence and icing">
+          <span>Model</span>
+          <button data-haz="off" aria-pressed="true">Off</button>
+          <button data-haz="turb" aria-pressed="false">Turbulence</button>
+          <button data-haz="icing" aria-pressed="false">Icing</button>
         </div>
         <div class="satpick" id="satpick" role="group" aria-label="Satellite">
           <span>Satellite</span>
@@ -100,6 +107,6 @@
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

@@ -1,7 +1,11 @@
 name: Deploy to GitHub Pages
 
-# The page reads all of its data live in the browser, so a deploy is only needed when the page changes.
+# Most of the page reads its data live in the browser. The FAA's TFR services send no CORS headers and
+# OurAirports' runway files are too large for a browser, so tools/collect.py gathers both into site/data
+# on every run, and the schedule keeps the TFRs current.
 on:
+  schedule:
+    - cron: "7,37 * * * *"
   push:
     branches: [main]
   workflow_dispatch:
@@ -23,6 +27,12 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # If a source can't be collected, publish the page anyway; it works without these files.
+      - run: python3 tools/collect.py
+        continue-on-error: true
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
