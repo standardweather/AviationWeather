@@ -8,6 +8,7 @@
  * Collected by GitHub Actions into data/ (tools/collect.py), because these sources send no CORS headers:
  *   FAA TFR list and shapes (tfr.json), OurAirports field elevations and runways (airports.json)
  * From FutureWeather (same site): GFS-derived turbulence and icing overlays for the hour nearest now
+ * Iowa Environmental Mesonet archives (Look back): past METARs, TAFs, SIGMETs, G-AIRMETs and PIREPs
  */
 (() => {
   "use strict";
@@ -79,6 +80,7 @@
     sat: { kind: "ir", layer: null, time: null },
     on: { metars: true, radar: true, sigmets: true, gairmets: true, pireps: true, tcf: false, winds: false, tfr: true },
     tfr: null, airports: null, hazard: "off",
+    past: null, pastForm: { ids: "", t: "", hours: 3 },
     nws: null, winds: null, windsError: false, windFcst: "6", windAlt: "9000", route: null,
     radar: { times: [], layers: [], idx: 0, timer: null, opacity: 0.6 },
   };
@@ -90,7 +92,7 @@
   if (!linked) map.fitBounds(CONUS);
   L.control.zoom({ position: "topright" }).addTo(map);
   map.attributionControl.setPrefix("");
-  [["sat", 260], ["radar", 300], ["hazard", 320], ["tcf", 340], ["tfr", 350], ["route", 360], ["gairmet", 380], ["sigmet", 420], ["highlight", 450], ["winds", 600], ["points", 620], ["labels", 640]]
+  [["sat", 260], ["radar", 300], ["hazard", 320], ["tcf", 340], ["tfr", 350], ["route", 360], ["gairmet", 380], ["sigmet", 420], ["pastRadar", 425], ["pastPoly", 430], ["highlight", 450], ["winds", 600], ["points", 620], ["pastPts", 630], ["labels", 640]]
     .forEach(([n, z]) => { map.createPane(n).style.zIndex = z; });
   map.getPane("labels").style.pointerEvents = "none";
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, attribution: "Esri" }).addTo(map);
@@ -101,7 +103,7 @@
   const layers = {
     metars: L.layerGroup(), sigmets: L.layerGroup(), gairmets: L.layerGroup(), pireps: L.layerGroup(), tcf: L.layerGroup(),
     highlight: L.layerGroup().addTo(map), winds: L.layerGroup(), route: L.layerGroup().addTo(map),
-    tfr: L.layerGroup(), hazard: L.layerGroup().addTo(map),
+    tfr: L.layerGroup(), hazard: L.layerGroup().addTo(map), past: L.layerGroup().addTo(map),
   };
   Object.entries(state.on).forEach(([k, v]) => { if (v && layers[k]) layers[k].addTo(map); });
 
@@ -258,7 +260,7 @@
 
   // Minimal TAF decoder: splits change groups and reads wind, visibility, weather and the ceiling,
   // carrying prevailing values into TEMPO/PROB groups that don't restate them.
-  function parseTaf(text, id) {
+  function parseTaf(text, id, baseMs) {
     const lines = text.replace(/\r/g, "").split("\n");
     const start = lines.findIndex((l) => new RegExp(`(^|\\s)${id}\\s+\\d{6}Z`).test(l));
     if (start < 0) return null;
@@ -270,7 +272,7 @@
     const raw = body.join("\n").replace(/=\s*$/, "");
     const tokens = raw.replace(/\s+/g, " ").trim().split(" ");
     const issue = tokens.find((t) => /^\d{6}Z$/.test(t));
-    const base = issue ? new Date() : new Date();
+    const base = new Date(baseMs ?? Date.now());
     const at = (dd, hh, mm = 0) => {
       const d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), +dd, +hh, +mm));
       if (d - base > 20 * 86400e3) d.setUTCMonth(d.getUTCMonth() - 1);     // month rollover
@@ -294,7 +296,7 @@
     }
     let prev = { wind: "—", vis: null, ceil: null, wx: "" };
     const periods = groups.map((g) => {
-      const out = { from: g.from, type: g.type === "BASE" ? "Initial" : g.type };
+      const out = { from: g.from, to: g.to, type: g.type === "BASE" ? "Initial" : g.type };
       let vis = null, ceil = null, wind = null, wx = [];
       g.tok.forEach((t, k) => {
         let m;
@@ -863,6 +865,7 @@
 
   // Click anywhere: list every visible SIGMET, AIRMET, CWA and G-AIRMET covering that point.
   map.on("click", (e) => {
+    if (state.view === "past") return;
     const pt = [e.latlng.lng, e.latlng.lat];
     const parts = [];
     if (state.on.sigmets) {
@@ -940,13 +943,290 @@
       </div>`;
   }
 
+  // —— Look back: the weather at airports at a past time, as an accident investigator would assemble it ———————
+  // From the Iowa Environmental Mesonet's archives of NWS and AWC products (CORS-enabled):
+  //   METARs and specials (asos.py), the TAF in effect (api/1/nws/taf.json, text from api/1/nwstext),
+  //   SIGMETs and convective SIGMETs (sigmets.py, KML), G-AIRMETs (awc_gairmets.py, KML), PIREPs (pireps.py, CSV).
+  const IEM = "https://mesonet.agron.iastate.edu";
+  const PAST_PIREP_NM = 100;
+
+  function parsePastTime(text) {
+    const m = String(text || "").trim().toUpperCase().match(/^(\d{4})-?(\d{2})-?(\d{2})[ T]?(\d{2}):?(\d{2})Z?$/);
+    return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) : null;
+  }
+  const isoZ = (t) => new Date(t).toISOString().slice(0, 16) + "Z";
+
+  /** Wind, visibility, weather, ceiling and flight category from a raw METAR. */
+  function decodeMetar(raw) {
+    const body = raw.split(" RMK")[0];
+    const tok = body.split(/\s+/);
+    let wind = null, gust = null, dir = null, vis = null, ceil = null, vv = false, temp = null, dew = null;
+    const wx = [];
+    tok.forEach((t, k) => {
+      let m;
+      if ((m = t.match(/^(\d{3}|VRB)(\d{2,3})(?:G(\d{2,3}))?KT$/))) { dir = m[1]; wind = +m[2]; gust = m[3] ? +m[3] : null; }
+      else if (/^P6SM$/.test(t)) vis = 6.1;
+      else if ((m = t.match(/^M?(\d+)\/(\d+)SM$/))) vis = (/^\d$/.test(tok[k - 1] || "") ? +tok[k - 1] : 0) + m[1] / m[2];
+      else if ((m = t.match(/^(\d+)SM$/))) vis = +m[1];
+      else if ((m = t.match(/^(BKN|OVC|VV)(\d{3})/))) { const h = +m[2] * 100; if (ceil == null || h < ceil) { ceil = h; vv = m[1] === "VV"; } }
+      else if ((m = t.match(/^(M?\d{2})\/(M?\d{2})?$/))) { temp = +m[1].replace("M", "-"); dew = m[2] ? +m[2].replace("M", "-") : null; }
+      else if (/^[-+]?(VC)?(MI|PR|BC|DR|BL|SH|TS|FZ)?(DZ|RA|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PY|PO|SQ|FC|SS|DS)+$/.test(t) || /^[-+]?(VC)?TS$/.test(t)) wx.push(t);
+    });
+    const pk = raw.match(/PK WND (\d{3})(\d{2,3})\/(\d{2,4})/);
+    return { dir, wind, gust, vis, ceil, vv, temp, dew, wx: wx.join(" "), cat: category(vis, ceil), peak: pk ? `${pk[1]}° ${+pk[2]} kt at ${pk[3].padStart(4, "0").slice(-4)}Z` : "",
+      special: /^SPECI\b/.test(raw) || / SPECI /.test(raw), lightning: /\b(LTG|TS)\b/.test(raw) };
+  }
+
+  function parseKml(text) {
+    const doc = new DOMParser().parseFromString(text, "application/xml");
+    return [...doc.getElementsByTagName("Placemark")].map((pm) => {
+      const p = {};
+      [...pm.getElementsByTagName("SimpleData")].forEach((d) => { p[d.getAttribute("name")] = d.textContent; });
+      const polys = [...pm.getElementsByTagName("Polygon")].map((poly) => {
+        const outer = poly.getElementsByTagName("outerBoundaryIs")[0] || poly;
+        const c = outer.getElementsByTagName("coordinates")[0]?.textContent || "";
+        return [c.trim().split(/\s+/).map((xy2) => xy2.split(",").slice(0, 2).map(Number)).filter((a) => a.length === 2 && a.every(Number.isFinite))];
+      }).filter((r) => r[0].length > 2);
+      return { p, geometry: polys.length ? { type: "MultiPolygon", coordinates: polys } : null };
+    }).filter((f) => f.geometry);
+  }
+
+  /** Distance in km from a point to a polygon's edge (0 inside). */
+  function kmToPolygon(geom, lat, lon) {
+    if (contains(geom, [lon, lat])) return 0;
+    let best = Infinity;
+    geom.coordinates.forEach((rings) => {
+      const ring = rings[0].map(([x, y]) => ({ lat: y, lon: x }));
+      best = Math.min(best, routeDistance(ring, lat, lon).d);
+    });
+    return best;
+  }
+
+  async function iemText(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`IEM ${res.status}`);
+    return res.text();
+  }
+
+  async function loadPast(ids, t, hours) {
+    const past = state.past = { ids, t, hours, status: "loading", airports: [], sigmets: null, gairmets: null, pireps: null };
+    renderPast();
+    const ymdh = (ms) => { const d = new Date(ms); return `year1=${d.getUTCFullYear()}&month1=${d.getUTCMonth() + 1}&day1=${d.getUTCDate()}&hour1=${d.getUTCHours()}&minute1=${d.getUTCMinutes()}`; };
+    const start = t - hours * 3600e3, end = t + 3600e3;
+    const metarUrl = `${IEM}/cgi-bin/request/asos.py?${ids.map((id) => `station=${id}`).join("&")}&data=metar&${ymdh(start)}&${ymdh(end).replace(/1=/g, "2=")}&tz=Etc/UTC&format=onlycomma&latlon=yes&missing=empty&report_type=3&report_type=4`;
+    const csv = await iemText(metarUrl).catch(() => "");
+    if (state.past !== past) return;
+    const rows = csv.trim().split("\n").slice(1).map((line) => {
+      const [station, valid, lon, lat, ...rest] = line.split(",");
+      const raw = rest.join(",").trim();
+      return { station, t: Date.parse(valid.replace(" ", "T") + "Z"), lat: +lat, lon: +lon, raw, ...decodeMetar(raw) };
+    }).filter((r) => r.raw && Number.isFinite(r.t));
+    past.airports = ids.map((id) => {
+      const short = id.length === 4 && id[0] === "K" ? id.slice(1) : id;
+      const obs = rows.filter((r) => r.station === id || r.station === short).sort((a, b) => a.t - b.t);
+      const live = state.metarIndex[id];
+      const lat = obs[0]?.lat ?? live?.lat, lon = obs[0]?.lon ?? live?.lon;
+      const before = obs.filter((o) => o.t <= t);
+      return { id, lat, lon, obs, at: before[before.length - 1] || null, next: obs.find((o) => o.t > t) || null, taf: undefined };
+    });
+    past.status = "ready";
+    renderPast();
+    const located = past.airports.filter((a) => Number.isFinite(a.lat));
+    if (located.length) map.fitBounds(L.latLngBounds(located.map((a) => [a.lat, a.lon])).pad(located.length > 1 ? 0.3 : 2.5), { maxZoom: 8, animate: false });
+    const done = () => { if (state.past === past) renderPast(); };
+    // TAF in effect at the time.
+    past.airports.forEach((a) => {
+      getJsonSafe(`${IEM}/api/1/nws/taf.json?station=${a.id}&issued=${isoZ(t)}`).then(async (d) => {
+        const pid = d?.data?.[0]?.product_id;
+        if (!pid) { a.taf = null; return; }
+        const text = await iemText(`${IEM}/api/1/nwstext/${pid}`).catch(() => "");
+        a.taf = parseTaf(text, a.id, t) || null;
+        if (a.taf) { a.taf.pid = pid; a.taf.issued = d.data[0].utc_taf_issue; }
+      }).catch(() => { a.taf = null; }).finally(done);
+    });
+    // SIGMETs and G-AIRMETs in effect at the time, with how far each was from each airport.
+    iemText(`${IEM}/cgi-bin/request/gis/sigmets.py?sts=${isoZ(t - 4 * 3600e3)}&ets=${isoZ(t + 60e3)}&format=kml`).then((kml) => {
+      past.sigmets = parseKml(kml).filter((f) => Date.parse(f.p.ISSUE) <= t && t < Date.parse(f.p.EXPIRE));
+    }).catch(() => { past.sigmets = []; past.sigmetsError = true; }).finally(done);
+    iemText(`${IEM}/cgi-bin/request/gis/awc_gairmets.py?sts=${isoZ(t - 6 * 3600e3)}&ets=${isoZ(t + 3 * 3600e3)}&format=kml`).then((kml) => {
+      const all = parseKml(kml).filter((f) => Date.parse(f.p.ISSUTIME) <= t);
+      // The snapshot nearest the time, from the newest issuance of each hazard.
+      const at = all.reduce((m, f) => { const v = Date.parse(f.p.VALID_AT); return m == null || Math.abs(v - t) < Math.abs(m - t) ? v : m; }, null);
+      const snap = all.filter((f) => Date.parse(f.p.VALID_AT) === at);
+      const newest = {};
+      snap.forEach((f) => { const k = f.p.HZTYPE; const it = Date.parse(f.p.ISSUTIME); if (!newest[k] || it > newest[k]) newest[k] = it; });
+      past.gairmets = snap.filter((f) => Date.parse(f.p.ISSUTIME) === newest[f.p.HZTYPE]);
+      past.gairmetAt = at;
+    }).catch(() => { past.gairmets = []; past.gairmetsError = true; }).finally(done);
+    // PIREPs within 100 nm of any airport, 90 minutes either side.
+    const lats = located.map((a) => a.lat), lons = located.map((a) => a.lon);
+    if (located.length) {
+      const cLat = (Math.min(...lats) + Math.max(...lats)) / 2, cLon = (Math.min(...lons) + Math.max(...lons)) / 2;
+      const deg = Math.min(10, 2 + Math.max(Math.max(...lats) - Math.min(...lats), Math.max(...lons) - Math.min(...lons)) / 2);
+      iemText(`${IEM}/cgi-bin/request/gis/pireps.py?sts=${isoZ(t - 90 * 60e3)}&ets=${isoZ(t + 90 * 60e3)}&fmt=csv&filter=1&lat=${cLat.toFixed(3)}&lon=${cLon.toFixed(3)}&degrees=${deg.toFixed(1)}`).then((text) => {
+        const lines = text.trim().split("\n");
+        const head = (lines.shift() || "").split(",");
+        const col = (name) => head.indexOf(name);
+        past.pireps = lines.map((line) => {
+          const c = line.match(/("[^"]*"|[^,]*)(,|$)/g).map((x) => x.replace(/,$/, "").replace(/^"|"$/g, ""));
+          const v = c[col("VALID")] || "";
+          const p = { t: Date.UTC(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(8, 10), +v.slice(10, 12)), report: c[col("REPORT")], urgent: c[col("URGENT")] === "T",
+            icing: c[col("ICING")], turb: c[col("TURBULENCE")], fl: c[col("FL")], aircraft: c[col("AIRCRAFT")], lat: +c[col("LAT")], lon: +c[col("LON")] };
+          p.nm = Math.min(...located.map((a) => kmBetween(a.lat, a.lon, p.lat, p.lon))) / NM;
+          return p;
+        }).filter((p) => Number.isFinite(p.lat) && p.nm <= PAST_PIREP_NM).sort((a, b) => a.t - b.t);
+      }).catch(() => { past.pireps = []; past.pirepsError = true; }).finally(done);
+    } else past.pireps = [];
+  }
+  async function getJsonSafe(url) { const r = await fetch(url); return r.ok ? r.json() : null; }
+  const kmBetween = (lat1, lon1, lat2, lon2) => {
+    const r = Math.PI / 180, a = Math.sin(((lat2 - lat1) * r) / 2) ** 2 + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin(((lon2 - lon1) * r) / 2) ** 2;
+    return 12742 * Math.asin(Math.sqrt(a));
+  };
+
+  /** SIGMETs and G-AIRMETs over or within 50 nm of an airport, nearest first. */
+  function pastAdvisories(a) {
+    const p = state.past;
+    if (!Number.isFinite(a.lat)) return [];
+    const out = [];
+    (p.sigmets || []).forEach((f) => { const km = kmToPolygon(f.geometry, a.lat, a.lon); if (km <= 50 * NM) out.push({ kind: f.p.TYPE === "C" ? "Convective SIGMET" : "SIGMET", name: f.p.LABEL || f.p.NAME, km, from: Date.parse(f.p.ISSUE), to: Date.parse(f.p.EXPIRE), text: f.p.TEXT, color: f.p.TYPE === "C" ? "#ff4d4d" : SIGMET_COLOR(f.p.TEXT || "") }); });
+    (p.gairmets || []).forEach((f) => { const km = kmToPolygon(f.geometry, a.lat, a.lon); if (km <= 50 * NM) out.push({ kind: "G-AIRMET", name: f.p.WXCOND || f.p.HZTYPE, km, from: Date.parse(f.p.VALID_FM), to: Date.parse(f.p.VALID_TO), text: `${f.p.HZTYPE} · ${f.p.PROD_ID}`, color: gairColor(f.p.HZTYPE) }); });
+    return out.sort((x, y) => x.km - y.km);
+  }
+  const gairColor = (hz) => (/Turbulence/i.test(hz) ? "#ff9548" : /Ic(e|ing)/i.test(hz) ? "#6fe3e8" : /Freez/i.test(hz) ? "#7cb8ff" : /Wind/i.test(hz) ? "#d2b48c" : /Shear/i.test(hz) ? "#ffd84a" : /Mountain/i.test(hz) ? "#ff7ab8" : "#b38bff");
+
+  // Looking back hides the live layers (and the radar loop) so only the archived products show.
+  const LIVE_PANES = ["sat", "radar", "hazard", "tcf", "tfr", "route", "gairmet", "sigmet", "highlight", "winds", "points"];
+  function drawPast() {
+    layers.past.clearLayers();
+    const look = state.view === "past";
+    LIVE_PANES.forEach((n) => { map.getPane(n).style.display = look ? "none" : ""; });
+    $("scrub").hidden = look;
+    const p = state.past;
+    if (!p || !look || !p.airports) return;
+    // NEXRAD composite reflectivity at the 5-minute mark at or before the time (IEM's archived mosaic tiles).
+    const rt = Math.floor(p.t / 300e3) * 300e3, d = new Date(rt);
+    const stamp = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
+    L.tileLayer(`${IEM}/cache/tile.py/1.0.0/ridge::USCOMP-N0Q-${stamp}/{z}/{x}/{y}.png`, { pane: "pastRadar", opacity: 0.7, maxNativeZoom: 10, attribution: "IEM NEXRAD archive" }).addTo(layers.past);
+    (p.gairmets || []).forEach((f) => L.geoJSON({ type: "Feature", geometry: f.geometry }, { pane: "pastPoly", style: { color: gairColor(f.p.HZTYPE), weight: 1.4, dashArray: "5 4", fillOpacity: 0.05 } })
+      .bindTooltip(`G-AIRMET · ${esc(f.p.WXCOND || f.p.HZTYPE)}`, { className: "tw-tip", sticky: true }).addTo(layers.past));
+    (p.sigmets || []).forEach((f) => L.geoJSON({ type: "Feature", geometry: f.geometry }, { pane: "pastPoly", style: { color: f.p.TYPE === "C" ? "#ff4d4d" : SIGMET_COLOR(f.p.TEXT || ""), weight: 2, fillOpacity: 0.08 } })
+      .bindTooltip(`${f.p.TYPE === "C" ? "Convective SIGMET" : "SIGMET"} ${esc(f.p.LABEL || "")} · ${hhmmZ(Date.parse(f.p.ISSUE))}–${hhmmZ(Date.parse(f.p.EXPIRE))}`, { className: "tw-tip", sticky: true }).addTo(layers.past));
+    (p.pireps || []).forEach((r) => {
+      const sev = /SEV|EXTRM/.test(`${r.turb} ${r.icing}`) ? "#ff3b30" : /MOD/.test(`${r.turb} ${r.icing}`) ? "#ff9548" : "#ffe27a";
+      L.circleMarker([r.lat, r.lon], { pane: "pastPts", radius: 5, color: "#060818", weight: 1, fillColor: sev, fillOpacity: 0.95 })
+        .bindTooltip(`${hhmmZ(r.t)} · ${esc(r.report)}`, { className: "tw-tip" }).addTo(layers.past);
+    });
+    p.airports.filter((a) => Number.isFinite(a.lat)).forEach((a) => {
+      L.circleMarker([a.lat, a.lon], { pane: "pastPts", radius: 8, color: "#fff", weight: 2.5, fillColor: fcColor(a.at?.cat), fillOpacity: 1 })
+        .bindTooltip(`${esc(a.id)} · ${a.at ? `${a.at.cat} at ${hhmmZ(a.at.t)}` : "no METAR"}`, { className: "tw-tip", permanent: p.airports.length <= 4, direction: "top", offset: [0, -8] }).addTo(layers.past);
+    });
+  }
+
+  function pastView() {
+    const p = state.past;
+    const f = state.pastForm;
+    let html = `<form class="search past" id="pastForm"><input id="pastIds" placeholder="Airports, e.g. KDSM KMSP" aria-label="Airports" autocomplete="off" value="${esc(f.ids)}" />
+      <input id="pastT" placeholder="YYYY-MM-DD HHMMZ" aria-label="Date and time (UTC)" autocomplete="off" value="${esc(f.t)}" style="text-transform:none" /><button class="btn btn--secondary">Look back</button></form>
+      <div class="satpick" style="padding:0 1.25rem"><span>METARs before</span>${[1, 3, 6, 12].map((h) => `<button data-pasth="${h}" aria-pressed="${f.hours === h}">${h} h</button>`).join("")}</div>`;
+    if (!p) return html + `<p class="empty">Enter one or more airports and a UTC date and time to see the weather an investigator would review: METARs and specials, the TAF in effect, SIGMETs, G-AIRMETs and PIREPs at that moment. Archives start in the 1990s for METARs, 2008 for SIGMETs and 2018 for G-AIRMETs.</p>`;
+    if (p.error) return html + `<p class="empty">${esc(p.error)}</p>`;
+    if (p.status === "loading") return html + `<p class="empty">Loading the archive…</p>`;
+    const t = p.t;
+    html += `<div class="pad"><h5 class="sub">${esc(p.ids.join(" · "))} · ${esc(isoZ(t).replace("T", " "))}</h5>`;
+    for (const a of p.airports) {
+      const m = a.at;
+      const adv = pastAdvisories(a);
+      html += `<h5 class="sub" style="margin-top:1rem;color:#fff">${esc(a.id)}${m ? ` <span class="fc" style="background:${fcColor(m.cat)}">${m.cat}</span>` : ""}</h5>`;
+      if (!a.obs.length) { html += `<p class="note">No archived METARs for ${esc(a.id)} in this window.</p>`; continue; }
+      if (m) {
+        html += `<p class="note" style="margin-top:0">Last report before the time: <b>${hhmmZ(m.t)}</b>, ${Math.round((t - m.t) / 60000)} min earlier${a.next ? `; next at ${hhmmZ(a.next.t)}` : ""}.</p>
+          <div class="raw">${esc(m.raw)}</div>
+          <dl class="kv"><dt>Wind</dt><dd>${m.wind === 0 ? "Calm" : m.wind != null ? `${m.dir === "VRB" ? "VRB" : `${m.dir}°`} ${m.wind}${m.gust ? ` gust ${m.gust}` : ""} kt` : "—"}</dd>
+          <dt>Visibility</dt><dd>${m.vis == null ? "—" : m.vis > 6 ? "6+ sm" : `${Math.round(m.vis * 100) / 100} sm`}</dd>
+          <dt>Ceiling</dt><dd>${m.ceil != null ? `${m.vv ? "VV " : ""}${m.ceil.toLocaleString()} ft` : "None"}</dd>
+          <dt>Weather</dt><dd>${esc(m.wx || "—")}</dd><dt>Temp / dew</dt><dd>${m.temp ?? "—"}° / ${m.dew ?? "—"}° C</dd>${m.peak ? `<dt>Peak wind</dt><dd>${esc(m.peak)}</dd>` : ""}</dl>`;
+      }
+      html += `<table class="t" style="margin-top:.5rem"><thead><tr><th>UTC</th><th></th><th>Report</th></tr></thead><tbody>${a.obs.map((o) => `<tr${o === m ? ' style="background:rgba(74,209,255,.08)"' : ""}><td>${ddhhZ(o.t)}${o.special ? "<small>SPECI</small>" : ""}</td><td><span class="fc" style="background:${fcColor(o.cat)}">${o.cat}</span></td><td style="font-size:.7rem">${esc(o.raw.replace(/^(METAR|SPECI)\s+/, "").replace(new RegExp(`^${a.id}\\s+`), ""))}</td></tr>`).join("")}</tbody></table>`;
+      if (a.taf === undefined) html += `<p class="note">Loading the TAF in effect…</p>`;
+      else if (!a.taf) html += `<p class="note">No TAF in effect for ${esc(a.id)} at the time.</p>`;
+      else {
+        const inEffect = a.taf.periods.filter((x) => x.from <= t && (x.type === "Initial" || x.type === "FM")).slice(-1)[0];
+        const temp = a.taf.periods.filter((x) => x.from <= t && x.to && t < x.to && x !== inEffect);
+        const pid = a.taf.pid.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/);
+        html += `<h5 class="sub">TAF in effect · issued ${pid ? esc(ddhhZ(Date.UTC(+pid[1], +pid[2] - 1, +pid[3], +pid[4], +pid[5]))) : "—"}${/-A[A-Z]{2}$/.test(a.taf.pid) ? " (amended)" : ""}</h5>
+          <p class="note" style="margin-top:0">${inEffect ? `Forecast for the time: <span class="fc" style="background:${fcColor(inEffect.cat)}">${inEffect.cat}</span> ${esc(inEffect.wind)} · ${inEffect.vis ? `${esc(inEffect.vis)} sm` : "—"}${inEffect.wx ? ` · ${esc(inEffect.wx)}` : ""}` : ""}
+          ${temp.map((x) => ` · ${esc(x.type)} until ${hhmmZ(x.to)} <span class="fc" style="background:${fcColor(x.cat)}">${x.cat}</span>${x.wx ? ` ${esc(x.wx)}` : ""}`).join("")}${m && inEffect ? ` · observed <span class="fc" style="background:${fcColor(m.cat)}">${m.cat}</span>` : ""}</p>
+          <div class="raw">${esc(a.taf.raw)}</div>`;
+      }
+      html += `<h5 class="sub">SIGMETs and G-AIRMETs within 50 nm</h5>`;
+      if (p.sigmets == null || p.gairmets == null) html += `<p class="note">Loading…</p>`;
+      else html += adv.length ? adv.map((x) => `<p class="note" style="margin:.25rem 0"><i class="dot" style="background:${x.color}"></i><b style="color:#fff">${esc(x.kind)} ${esc(x.name)}</b> · ${x.km === 0 ? "over the airport" : `${Math.round(x.km / NM)} nm away`} · ${ddhhZ(x.from)}–${ddhhZ(x.to)}
+          ${x.kind !== "G-AIRMET" ? `<details><summary>Text</summary><pre style="white-space:pre-wrap;font:.7rem/1.45 var(--mono);color:var(--text2)">${esc(x.text)}</pre></details>` : ""}</p>`).join("")
+        : `<p class="note">None in effect over or near ${esc(a.id)}${p.sigmetsError || p.gairmetsError ? " (part of the archive didn't load)" : ""}.</p>`;
+    }
+    html += `<h5 class="sub" style="margin-top:1rem">PIREPs within ${PAST_PIREP_NM} nm, 90 min either side</h5>`;
+    if (p.pireps == null) html += `<p class="note">Loading…</p>`;
+    else html += p.pireps.length ? `<table class="t"><tbody>${p.pireps.map((r) => `<tr data-ll="${r.lat},${r.lon}"><td>${hhmmZ(r.t)}${r.urgent ? "<small>URGENT</small>" : ""}</td><td style="font-size:.7rem">${esc(r.report)}<small>${Math.round(r.nm)} nm away</small></td></tr>`).join("")}</tbody></table>`
+      : `<p class="note">None reported.</p>`;
+    html += `<div class="actions" style="display:flex;gap:1rem;margin-top:.8rem;font-size:.82rem"><a href="#" data-pastprint="1">Print record</a><a href="#" data-pastcsv="1">METARs as CSV</a>
+        <a href="/?${new URLSearchParams({ request: "report", place: p.ids.join(", "), when: `${isoZ(t).replace("T", " ")} UTC`, link: location.href })}#contact">Request a certified report</a></div>
+      <p class="note">METARs, TAFs, SIGMETs, G-AIRMETs and PIREPs from the NWS and Aviation Weather Center, archived by the Iowa Environmental Mesonet (Iowa State University). G-AIRMET snapshot shown: ${p.gairmetAt ? esc(ddhhZ(p.gairmetAt)) : "—"}. Map radar: NEXRAD composite at ${esc(hhmmZ(Math.floor(t / 300e3) * 300e3))}.
+        Not an official weather briefing record; FAA and NTSB use the archived products themselves.</p></div>`;
+    return html;
+  }
+  function renderPast() { if (state.view === "past") { render(); drawPast(); } }
+
+  function pastCsv() {
+    const p = state.past;
+    const q = (v) => (/[",\n]/.test(String(v ?? "")) ? `"${String(v).replace(/"/g, '""')}"` : String(v ?? ""));
+    const rows = [["station", "time_utc", "type", "flight_category", "wind_dir", "wind_kt", "gust_kt", "visibility_sm", "ceiling_ft", "weather", "temp_c", "dewpoint_c", "raw"]];
+    p.airports.forEach((a) => a.obs.forEach((o) => rows.push([a.id, isoZ(o.t), o.special ? "SPECI" : "METAR", o.cat, o.dir, o.wind, o.gust, o.vis, o.ceil, o.wx, o.temp, o.dew, o.raw])));
+    const blob = new Blob([rows.map((r) => r.map(q).join(",")).join("\r\n")], { type: "text/csv" });
+    const el = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: `metars-${p.ids.join("-")}-${isoZ(p.t).slice(0, 16).replace(/[-:]/g, "")}.csv` });
+    el.click();
+    setTimeout(() => URL.revokeObjectURL(el.href), 1000);
+  }
+  function pastPrint() {
+    const w = window.open("", "_blank");
+    if (!w) { setStatus("Allow pop-ups to print the record"); return; }
+    const panel = document.createElement("div");
+    panel.innerHTML = pastView();
+    panel.querySelector("form")?.remove();
+    panel.querySelectorAll(".satpick, .actions").forEach((el) => el.remove());
+    panel.querySelectorAll("details").forEach((d) => d.setAttribute("open", ""));
+    w.document.write(`<!doctype html><meta charset="utf-8"><title>Weather at ${esc(state.past.ids.join(" "))} · ${esc(isoZ(state.past.t))}</title>
+      <style>body{font:11px/1.45 system-ui,sans-serif;margin:24px;color:#111}h5{font-size:13px;margin:14px 0 4px;border-bottom:1px solid #bbb}.raw,pre{font:10px/1.4 monospace;white-space:pre-wrap;background:#f4f4f4;padding:4px 6px}
+      table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:2px 4px;text-align:left;vertical-align:top}small{display:block;color:#555}.fc{font:600 10px monospace;padding:0 4px;border:1px solid #999}
+      dl{display:grid;grid-template-columns:auto 1fr;gap:1px 10px;margin:4px 0}dt{color:#555}dd{margin:0}.dot{display:none}summary{display:none}</style>
+      <h1 style="font-size:17px;margin:0">Weather record · ${esc(state.past.ids.join(", "))} · ${esc(isoZ(state.past.t).replace("T", " "))} UTC</h1>
+      <p style="color:#555">Prepared ${esc(isoZ(Date.now()).replace("T", " "))} UTC with Standard Weather AviationWeather · ${esc(location.href)}</p>${panel.innerHTML}`);
+    w.document.close();
+    w.focus();
+    w.print();
+  }
+
   // —— Sidebar ——————————————————————————————————————————————————————
   function setTabs() { document.querySelectorAll("#views button").forEach((b) => b.setAttribute("aria-selected", b.dataset.view === state.view)); }
   function render() {
-    const views = { airports: airportsView, route: routeView, advisories: advisoriesView, pireps: pirepsView, winds: windsView };
+    const views = { airports: airportsView, route: routeView, advisories: advisoriesView, pireps: pirepsView, winds: windsView, past: pastView };
     $("panel").innerHTML = (views[state.view] || airportsView)();
   }
-  $("views").addEventListener("click", (e) => { const v = e.target.closest("[data-view]")?.dataset.view; if (v) { state.view = v; setTabs(); render(); if (v === "winds") showWinds(); } });
+  $("views").addEventListener("click", (e) => { const v = e.target.closest("[data-view]")?.dataset.view; if (v) { state.view = v; setTabs(); render(); drawPast(); if (v === "winds") showWinds(); } });
+
+  function submitPast() {
+    const ids = ($("pastIds")?.value ?? state.pastForm.ids).toUpperCase().split(/[\s,]+/).filter(Boolean)
+      .map((id) => (/^[A-Z0-9]{3}$/.test(id) && state.metarIndex[`K${id}`] ? `K${id}` : id)).slice(0, 6);
+    const tText = $("pastT")?.value ?? state.pastForm.t;
+    state.pastForm.ids = ids.join(" ");
+    state.pastForm.t = tText;
+    const t = parsePastTime(tText);
+    if (!ids.length || t == null) { state.past = { error: "Enter one or more airport identifiers and a time like 2024-05-21 1930Z." }; render(); return; }
+    if (t > Date.now()) { state.past = { error: "That time is in the future." }; render(); return; }
+    const q = new URLSearchParams({ view: "past", ids: ids.join(" "), t: isoZ(t).replace(/[-:]/g, "").replace("T", "T"), h: state.pastForm.hours });
+    history.replaceState(null, "", `?${q}`);
+    loadPast(ids, t, state.pastForm.hours);
+  }
 
   // Opening the Winds aloft tab turns on the barbs.
   function showWinds() {
@@ -958,6 +1238,7 @@
 
   $("panel").addEventListener("submit", (e) => {
     if (e.target.id === "routeForm") { e.preventDefault(); briefRoute($("routeQ").value, state.route?.nm || 50); return; }
+    if (e.target.id === "pastForm") { e.preventDefault(); submitPast(); return; }
     if (e.target.id !== "search") return;
     e.preventDefault();
     let id = $("q").value.trim().toUpperCase();
@@ -966,8 +1247,11 @@
   });
 
   $("panel").addEventListener("click", (e) => {
+    const a = e.target.closest("[data-pastprint], [data-pastcsv]");
+    if (a) { e.preventDefault(); if (a.dataset.pastprint) pastPrint(); else pastCsv(); return; }
     const t = e.target.closest("button, tr");
     if (!t) return;
+    if (t.dataset.pasth) { state.pastForm.hours = +t.dataset.pasth; if (state.past) submitPast(); else render(); return; }
     if (t.dataset.cor) {
       const text = state.route?.text || $("routeQ").value;
       if (text.trim()) briefRoute(text, +t.dataset.cor); else { state.route = null; render(); }
@@ -1076,7 +1360,12 @@
     setStatus(res[0].status === "rejected" ? "METARs unavailable — try again shortly" : "");
     const params = new URLSearchParams(location.search);
     const viewParam = params.get("view");
-    if (["advisories", "pireps", "winds", "route"].includes(viewParam)) { state.view = viewParam; setTabs(); }
+    if (["advisories", "pireps", "winds", "route", "past"].includes(viewParam)) { state.view = viewParam; setTabs(); }
+    if (viewParam === "past" && params.get("ids") && params.get("t")) {
+      const tm = params.get("t").match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})Z?$/);
+      state.pastForm = { ids: params.get("ids"), t: tm ? `${tm[1]}-${tm[2]}-${tm[3]} ${tm[4]}${tm[5]}Z` : params.get("t"), hours: [1, 3, 6, 12].includes(+params.get("h")) ? +params.get("h") : 3 };
+      submitPast();
+    }
     if (viewParam === "winds") showWinds();
     if (viewParam === "route" && params.get("route")) briefRoute(params.get("route"), [25, 50, 100].includes(+params.get("w")) ? +params.get("w") : 50);
     else if (linked && state.metarIndex[linked]) selectStation(linked, true, true, state.view !== "airports");
