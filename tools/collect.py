@@ -2,9 +2,9 @@
 
     tfr.json       active Temporary Flight Restrictions: shapes from the FAA TFR GeoServer joined to the
                    FAA's TFR list (type and description). Neither service sends CORS headers.
-    airports.json  {ICAO: [field elevation, runways]}: elevation and runways (ends, true headings, length) for airports with a 4-letter
-                   identifier, from OurAirports' public-domain data (too large to load in a browser),
-                   for density altitude and crosswinds.
+    airports.json  {ICAO: [field elevation, runways]}: elevation and runways (ends, true headings, length, width and
+                   the ends' positions) for airports with a 4-letter identifier, from OurAirports' public-domain
+                   data (too large to load in a browser), for density altitude, crosswinds and the runway diagram.
 
 Standard library only. A source that fails leaves its previous file (if any) in place.
 
@@ -14,6 +14,7 @@ Standard library only. A source that fails leaves its previous file (if any) in 
 import csv
 import io
 import json
+import math
 import sys
 import time
 import urllib.request
@@ -68,6 +69,7 @@ def airports():
         if len(ident) == 4 and ident.isalnum() and r["type"] not in ("closed", "heliport", "balloonport"):
             elev[ident] = num(r["elevation_ft"])
     by_ref = {}
+    ends = {}
     out = {}
     for r in csv.DictReader(io.StringIO(get(f"{OURAIRPORTS}/runways.csv").decode("utf-8", "replace"))):
         ident = r["airport_ident"]
@@ -76,15 +78,35 @@ def airports():
         length = num(r["length_ft"])
         if length is not None and length < 1000:
             continue
+        pos = [num(r[k]) for k in ("le_latitude_deg", "le_longitude_deg", "he_latitude_deg", "he_longitude_deg")]
+        pos = pos if None not in pos and pos[:2] != pos[2:] else None
         hdg = num(r["le_heading_degT"])
+        if hdg is None and pos:
+            # True bearing from the low end to the high end.
+            la1, lo1, la2, lo2 = map(math.radians, pos)
+            hdg = math.degrees(math.atan2(math.sin(lo2 - lo1) * math.cos(la2),
+                                          math.cos(la1) * math.sin(la2) - math.sin(la1) * math.cos(la2) * math.cos(lo2 - lo1))) % 360
         if hdg is None:
             digits = "".join(ch for ch in r["le_ident"] if ch.isdigit())
             if not digits:
                 continue
             hdg = int(digits) * 10   # magnetic, from the runway number; close enough for a crosswind estimate
-        by_ref.setdefault(ident, []).append([r["le_ident"], r["he_ident"], round(hdg), int(length) if length else None])
+        width = num(r["width_ft"])
+        by_ref.setdefault(ident, []).append([r["le_ident"], r["he_ident"], round(hdg) % 360, int(length) if length else None,
+                                             int(width) if width else None, pos])
+        if pos:
+            ends.setdefault(ident, []).extend([pos[:2], pos[2:]])
     for ident, rwy in by_ref.items():
-        out[ident] = [elev[ident], rwy]   # [field elevation ft, [[end, other end, heading °T, length ft], ...]]
+        # Runway ends as feet east and north of the middle of all the ends, for drawing the airport's layout.
+        pts = ends.get(ident)
+        if pts:
+            lat0 = sum(p[0] for p in pts) / len(pts)
+            lon0 = sum(p[1] for p in pts) / len(pts)
+            k = 364567 * math.cos(math.radians(lat0))   # feet per degree of longitude; 364,567 per degree of latitude
+            for rw in rwy:
+                p = rw[5]
+                rw[5] = [round((p[1] - lon0) * k), round((p[0] - lat0) * 364567), round((p[3] - lon0) * k), round((p[2] - lat0) * 364567)] if p else None
+        out[ident] = [elev[ident], rwy]   # [field elevation ft, [[end, other end, heading °T, length ft, width ft, [x1, y1, x2, y2] ft or null], ...]]
     return out
 
 

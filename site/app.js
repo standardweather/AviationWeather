@@ -629,8 +629,9 @@
       const wind = m.wind_speed_kt === 0 ? "Calm" : `${m.winddir ?? "VRB"}° ${m.wind_speed_kt}${m.wind_gust_kt ? ` gust ${m.wind_gust_kt}` : ""} kt`;
       html += `<h5 class="sub">${esc(m.station_id)} · METAR ${ddhhZ(newer ? newer.t : m.observation_time)} · ${ago(newer ? newer.t : m.observation_time)}</h5>
         <div class="raw">${esc(newer ? newer.raw : m.raw_text)}</div>
-        ${newer ? `<p class="note" style="margin:.3rem 0 0">Newest report from the NWS API; the decoded values below are from ${hhmmZ(m.observation_time)}.</p>` : ""}
-        <dl class="kv"><dt>Category</dt><dd><span class="fc" style="background:${fcColor(m.flight_category)}">${esc(m.flight_category || "—")}</span></dd>
+        ${newer ? `<p class="note" style="margin:.3rem 0 0">Newest report from the NWS API; the graphics follow it, and the decoded values below are from ${hhmmZ(m.observation_time)}.</p>` : ""}
+        ${metarGraphics(m, newer ? newer.raw : m.raw_text)}
+        <h5 class="sub">Decoded</h5><dl class="kv"><dt>Category</dt><dd><span class="fc" style="background:${fcColor(m.flight_category)}">${esc(m.flight_category || "—")}</span></dd>
           <dt>Wind</dt><dd>${esc(wind)}</dd><dt>Visibility</dt><dd>${esc(m.visibility_statute_mi ?? "—")} sm</dd>
           <dt>Ceiling</dt><dd>${m.ceiling_ft ? `${m.ceiling_ft.toLocaleString()} ft` : m.vert_vis_ft ? `VV ${m.vert_vis_ft} ft` : "None"}</dd>
           <dt>Weather</dt><dd>${esc(m.wx_string || "—")}</dd><dt>Temp / dew</dt><dd>${m.temp_c ?? "—"}° / ${m.dewpoint_c ?? "—"}° C</dd>
@@ -651,7 +652,287 @@
     return html + `</div>`;
   }
 
-  // —— Density altitude and crosswinds (field data from data/airports.json) ——————————————
+  // —— METAR graphics: sky, flight-category limits, runways and wind, temperature ————————————
+  // Drawn from the report shown above them (the NWS API's when it's newer), falling back to AWC's decoded
+  // fields for anything the raw text doesn't give in US units.
+  const MONO = 'font-family="IBM Plex Mono, monospace" font-size="9.5"';
+  const OKTAS = { FEW: 2, SCT: 4, BKN: 6, OVC: 8 };
+  const WX_WORDS = {
+    MI: "shallow", PR: "partial", BC: "patches of", DR: "low drifting", BL: "blowing", SH: "showers of", TS: "thunderstorm", FZ: "freezing",
+    DZ: "drizzle", RA: "rain", SN: "snow", SG: "snow grains", IC: "ice crystals", PL: "ice pellets", GR: "hail", GS: "small hail", UP: "unknown precipitation",
+    BR: "mist", FG: "fog", FU: "smoke", VA: "volcanic ash", DU: "dust", SA: "sand", HZ: "haze", PY: "spray", PO: "dust whirls", SQ: "squalls", FC: "funnel cloud", SS: "sandstorm", DS: "duststorm",
+  };
+  const num = (v) => (v == null || v === "" || !Number.isFinite(+String(v).replace("+", "")) ? null : +String(v).replace("+", ""));
+  // Wind relative to a runway heading: + head is a headwind, + cross is from the right.
+  const windComp = (dir, hdg, spd) => { const r = ((dir - hdg) * Math.PI) / 180; return { head: spd * Math.cos(r), cross: spd * Math.sin(r) }; };
+
+  function observation(m, raw) {
+    const d = decodeMetar(raw);
+    const body = raw.split(" RMK")[0];
+    const tok = body.split(/\s+/);
+    const layers = [];
+    let clear = null;
+    tok.forEach((t) => {
+      let x;
+      if ((x = t.match(/^(FEW|SCT|BKN|OVC)(\d{3})(CB|TCU)?$/))) layers.push({ cov: x[1], base: +x[2] * 100, type: x[3] || "" });
+      else if ((x = t.match(/^VV(\d{3})$/))) layers.push({ cov: "VV", base: +x[1] * 100, type: "" });
+      else if (/^(SKC|CLR|NCD|NSC|CAVOK)$/.test(t)) clear = t;
+    });
+    // Metric visibility (e.g. 9999, 0800) and CAVOK for airports outside the US.
+    let vis = d.vis;
+    if (vis == null && clear === "CAVOK") vis = 6.2;
+    const mv = tok.slice(2).find((t) => /^\d{4}$/.test(t));
+    if (vis == null && mv) vis = mv === "9999" ? 6.2 : +mv / 1609.34;
+    if (vis == null) vis = num(m.visibility_statute_mi) ?? null;
+    const vrb = body.match(/\b(\d{3})V(\d{3})\b/);
+    const dirRaw = d.wind != null ? d.dir : m.winddir;
+    const dir = num(dirRaw);
+    const spd = d.wind ?? num(m.wind_speed_kt);
+    const gust = d.wind != null ? d.gust : num(m.wind_gust_kt) || null;
+    const ceilLayer = layers.filter((l) => /BKN|OVC|VV/.test(l.cov)).sort((a, b) => a.base - b.base)[0];
+    const ceil = ceilLayer ? ceilLayer.base : null;
+    return {
+      layers: layers.sort((a, b) => a.base - b.base), clear, ceil, ceilLayer, vis, spd, gust,
+      dir: spd === 0 ? null : dir, variable: vrb ? [+vrb[1], +vrb[2]] : null,
+      temp: d.temp ?? num(m.temp_c), dew: d.dew ?? num(m.dewpoint_c), wx: d.wx || (raw === m.raw_text ? m.wx_string || "" : ""),
+      cat: raw === m.raw_text && m.flight_category ? m.flight_category : category(vis, ceil),
+    };
+  }
+
+  function wxPhrase(t) {
+    if (t === "+FC") return "Tornado or waterspout";
+    const x = t.match(/^([-+]?)(VC)?(MI|PR|BC|DR|BL|SH|TS|FZ)?(.*)$/);
+    const intensity = x[1] === "-" ? "light" : x[1] === "+" ? "heavy" : "";
+    const what = (x[4].match(/../g) || []).map((c) => WX_WORDS[c] || c).join(" and ");
+    const d = x[3] ? WX_WORDS[x[3]] : "";
+    let out = x[3] === "TS" ? (what ? `thunderstorm with ${[intensity, what].filter(Boolean).join(" ")}` : "thunderstorm")
+      : x[3] === "SH" ? [intensity, what, "showers"].filter(Boolean).join(" ")
+      : [intensity, d, what].filter(Boolean).join(" ");
+    out = out.replace(/ of$/, "");
+    return out.charAt(0).toUpperCase() + out.slice(1) + (x[2] ? " in the vicinity" : "");
+  }
+  function wxChips(wx) {
+    if (!wx) return "";
+    return `<div class="wxchips">${wx.split(/\s+/).filter(Boolean).map((t) => {
+      const sev = /TS|GR|FC|SQ|\+|VA|SS|DS/.test(t) ? "sev" : /FZ|PL|IC|SN|SG|GS/.test(t) ? "cold" : "";
+      return `<span class="${sev}" title="${esc(t)}">${esc(wxPhrase(t))}</span>`;
+    }).join("")}</div>`;
+  }
+
+  // Cloud layers on a square-root height scale, so a 300 ft layer and a 25,000 ft layer both show.
+  function skyGraphic(o, elev) {
+    const W = 336, H = 176, X0 = 42, X1 = 238, T = 12, G = H - 22;
+    const top = o.layers.length ? Math.min(30000, Math.max(5000, Math.ceil((o.layers[o.layers.length - 1].base * 1.3) / 1000) * 1000)) : 12000;
+    const y = (h) => G - Math.sqrt(Math.max(0, h) / top) * (G - T);
+    const fl = o.temp != null ? (o.temp <= 0 ? 0 : (o.temp / 2) * 1000) : null;   // standard lapse rate, 2 °C per 1,000 ft
+    let svg = `<rect x="${X0}" y="${T}" width="${X1 - X0}" height="${G - T}" fill="url(#skyfade)"/>`;
+    let lastY = Infinity;
+    [500, 1000, 2000, 3000, 5000, 8000, 12000, 18000, 25000, 30000].filter((h) => h <= top).forEach((h) => {
+      if (lastY - y(h) < 13) return;
+      lastY = y(h);
+      svg += `<line x1="${X0}" x2="${X1}" y1="${y(h).toFixed(1)}" y2="${y(h).toFixed(1)}" stroke="rgba(255,255,255,.06)"/><text x="${X0 - 5}" y="${(y(h) + 3).toFixed(1)}" text-anchor="end" ${MONO} fill="rgba(255,255,255,.42)">${h >= 1000 ? `${h / 1000}k` : h}</text>`;
+    });
+    svg += `<rect x="${X0}" y="${G}" width="${X1 - X0}" height="5" fill="#3a3326"/><text x="${X0 - 5}" y="${G + 4}" text-anchor="end" ${MONO} fill="rgba(255,255,255,.42)">SFC</text>`;
+    const slot = (X1 - X0) / 8;
+    const labels = [];
+    o.layers.forEach((l) => {
+      const ly = y(l.base);
+      if (l.cov === "VV") {
+        svg += `<rect x="${X0}" y="${ly.toFixed(1)}" width="${X1 - X0}" height="${(G - ly).toFixed(1)}" fill="url(#obsc)"/><line x1="${X0}" x2="${X1}" y1="${ly.toFixed(1)}" y2="${ly.toFixed(1)}" stroke="${fcColor(o.cat)}" stroke-width="1.5"/>`;
+      } else {
+        const n = OKTAS[l.cov];
+        const cb = l.type === "CB", tcu = l.type === "TCU";
+        const fill = cb ? "#5d6278" : tcu ? "#9aa0b8" : "rgba(235,240,255,.82)";
+        for (let k = 0; k < n; k++) {
+          const cx = X0 + slot * (Math.round(((k + 0.5) * 8) / n - 0.5) + 0.5);
+          const tall = cb ? 2.2 : tcu ? 1.6 : 1;
+          svg += `<g fill="${fill}"${cb ? ' stroke="#ff4d4d" stroke-width=".8"' : ""}><circle cx="${(cx - 6).toFixed(1)}" cy="${(ly - 4 * tall).toFixed(1)}" r="5.5"/><circle cx="${cx.toFixed(1)}" cy="${(ly - 7 * tall).toFixed(1)}" r="${(7 * Math.min(tall, 1.5)).toFixed(1)}"/><circle cx="${(cx + 6).toFixed(1)}" cy="${(ly - 4 * tall).toFixed(1)}" r="5.5"/><rect x="${(cx - 11).toFixed(1)}" y="${(ly - 5).toFixed(1)}" width="22" height="5"/></g>`;
+        }
+        if (l === o.ceilLayer) svg += `<line x1="${X0}" x2="${X1}" y1="${ly.toFixed(1)}" y2="${ly.toFixed(1)}" stroke="${fcColor(o.cat)}" stroke-width="1.5"/>`;
+      }
+      labels.push({ y: ly, l });
+    });
+    if (fl != null && fl <= top) {
+      svg += `<line x1="${X0}" x2="${X1}" y1="${y(fl).toFixed(1)}" y2="${y(fl).toFixed(1)}" stroke="#6fe3e8" stroke-dasharray="3 3" stroke-width="1"/>`
+        + `<text x="${X1 - 3}" y="${(y(fl) - 3).toFixed(1)}" text-anchor="end" ${MONO} font-size="8.5" fill="#6fe3e8" stroke="#0b0f26" stroke-width="3" paint-order="stroke">0°C ≈ ${fl ? `${(Math.round(fl / 500) * 500).toLocaleString()} ft` : "at surface"}</text>`;
+    }
+    // Labels to the right, nudged apart when layers are close together.
+    for (let i = 1; i < labels.length; i++) if (labels[i - 1].y - labels[i].y < 12) labels[i].y = labels[i - 1].y - 12;
+    labels.forEach(({ y: ly, l }) => {
+      const ceilHere = l === o.ceilLayer;
+      svg += `<text x="${X1 + 6}" y="${(Math.max(ly, T + 2) + 3).toFixed(1)}" ${MONO} fill="${ceilHere ? fcColor(o.cat) : "rgba(255,255,255,.82)"}"${ceilHere ? ' font-weight="600"' : ""}>${l.cov} ${l.base.toLocaleString()}${l.type ? ` <tspan fill="${l.type === "CB" ? "#ff4d4d" : "#ffbf47"}">${l.type}</tspan>` : ""}</text>`;
+    });
+    if (!o.layers.length) {
+      const msg = o.clear === "CLR" ? "No clouds below 12,000 ft (automated)" : o.clear === "CAVOK" ? "CAVOK: no cloud below 5,000 ft" : o.clear ? "Sky clear" : "No cloud groups reported";
+      svg += `<text x="${(X0 + X1) / 2}" y="${(T + G) / 2}" text-anchor="middle" font-size="11" fill="rgba(255,255,255,.6)">${msg}</text>`;
+    }
+    const cap = [o.ceil != null ? `${o.ceilLayer.cov === "VV" ? "Vertical visibility" : "Ceiling"} ${o.ceil.toLocaleString()} ft AGL` : "No ceiling",
+      elev != null ? `field ${Math.round(elev).toLocaleString()} ft MSL` : "", o.ceil != null && elev != null ? `${Math.round(o.ceil + elev).toLocaleString()} ft MSL` : ""].filter(Boolean);
+    return `<h5 class="sub">Clouds</h5><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Cloud layers: ${esc(o.layers.map((l) => `${l.cov} ${l.base} ft`).join(", ") || "none")}">
+      <defs><linearGradient id="skyfade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#16204a" stop-opacity=".25"/><stop offset="1" stop-color="#4ad1ff" stop-opacity=".08"/></linearGradient>
+      <pattern id="obsc" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="rgba(200,205,225,.12)"/><line x1="0" y1="0" x2="0" y2="6" stroke="rgba(200,205,225,.35)" stroke-width="2"/></pattern></defs>${svg}
+      <text x="${W}" y="${H - 3}" text-anchor="end" ${MONO} font-size="8.5" fill="rgba(255,255,255,.42)">${esc(cap.join(" · "))}</text></svg>
+      <p class="note" style="margin-top:.2rem">Feet above the field. Puffs show coverage in eighths; dashed line: freezing level estimated from the surface temperature.</p>`;
+  }
+
+  // Where visibility and ceiling sit against the VFR / MVFR / IFR / LIFR limits.
+  function categoryGraphic(o) {
+    const W = 336, H = 70, X0 = 62, X1 = 326;
+    const scale = (stops) => (v) => {
+      if (v == null) return X1;
+      for (let i = 1; i < stops.length; i++) if (v <= stops[i]) return X0 + ((i - 1 + (v - stops[i - 1]) / (stops[i] - stops[i - 1])) / (stops.length - 1)) * (X1 - X0);
+      return X1;
+    };
+    const row = (yy, label, stops, value, valueText, ticks) => {
+      const sx = scale(stops);
+      let s = `<text x="0" y="${yy + 7}" font-size="10.5" fill="rgba(255,255,255,.6)">${label}</text>`;
+      ["LIFR", "IFR", "MVFR", "VFR"].forEach((c, i) => { s += `<rect x="${sx(stops[i]).toFixed(1)}" y="${yy}" width="${(sx(stops[i + 1]) - sx(stops[i])).toFixed(1)}" height="9" fill="${FC[c]}" opacity=".45"/>`; });
+      ticks.forEach(([v, t]) => { s += `<text x="${sx(v).toFixed(1)}" y="${yy + 19}" text-anchor="middle" ${MONO} font-size="8.5" fill="rgba(255,255,255,.42)">${t}</text>`; });
+      const vx = Math.min(X1, sx(value));
+      s += `<path d="M${(vx - 4.5).toFixed(1)} ${yy - 6}h9l-4.5 6z" fill="#fff"/><line x1="${vx.toFixed(1)}" x2="${vx.toFixed(1)}" y1="${yy}" y2="${yy + 9}" stroke="#fff" stroke-width="2"/>`
+        + `<text x="${Math.min(Math.max(vx, X0 + 20), X1 - 20).toFixed(1)}" y="${yy - 8}" text-anchor="middle" ${MONO} fill="#fff">${valueText}</text>`;
+      return s;
+    };
+    const visTxt = o.vis == null ? "—" : o.vis > 6 ? "6+ sm" : `${Math.round(o.vis * 100) / 100} sm`;
+    const svg = row(14, "Visibility", [0, 1, 3, 5, 10], o.vis == null ? null : Math.min(o.vis, 10), visTxt, [[1, "1"], [3, "3"], [5, "5"], [10, "10+"]])
+      + row(48, "Ceiling", [0, 500, 1000, 3000, 6000], o.ceil == null ? null : Math.min(o.ceil, 6000), o.ceil == null ? "none" : `${o.ceil.toLocaleString()} ft`, [[500, "500"], [1000, "1,000"], [3000, "3,000"]]);
+    return `<h5 class="sub">Flight category <span class="fc" style="background:${fcColor(o.cat)};margin-left:.35rem">${esc(o.cat || "—")}</span></h5>
+      <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Visibility ${esc(visTxt)} and ceiling ${o.ceil ?? "none"} against flight-category limits">${svg}</svg>`;
+  }
+
+  // The airport's runways to scale (from OurAirports' end positions), with the wind and each end's components.
+  function runwayGraphic(o, rwys) {
+    if (!rwys?.length) return "";
+    const W = 336, H = 214, cx = 104, cy = 107, R = 82, RR = 58;
+    const hasPos = rwys.every((r) => r[5]);
+    // Each runway as [x1, y1, x2, y2] in feet east / north; without positions, all through the middle.
+    const segs = rwys.map(([a, b, hdg, len, wid, pos]) => {
+      if (hasPos) return pos;
+      const h = (hdg * Math.PI) / 180, half = (len || 5000) / 2;
+      return [-Math.sin(h) * half, -Math.cos(h) * half, Math.sin(h) * half, Math.cos(h) * half];
+    });
+    const ext = Math.max(...segs.flatMap(([x1, y1, x2, y2]) => [Math.hypot(x1, y1), Math.hypot(x2, y2)]), 1);
+    const k = RR / ext;
+    const P = (x, yy) => [cx + x * k, cy - yy * k];
+    const longest = Math.max(...rwys.map((r) => r[3] || 0));
+
+    let best = null;
+    const ends = [];
+    if (o.dir != null && o.spd) {
+      rwys.forEach(([a, b, hdg, len]) => [[a, hdg], [b, (hdg + 180) % 360]].forEach(([id, h]) => {
+        if (id) ends.push({ id, hdg: h, len, ...windComp(o.dir, h, o.spd), gx: o.gust ? windComp(o.dir, h, o.gust).cross : null });
+      }));
+      ends.sort((p, q) => q.head - p.head);
+      best = ends[0];
+    }
+
+    let svg = `<circle cx="${cx}" cy="${cy}" r="${R}" fill="rgba(255,255,255,.025)" stroke="rgba(255,255,255,.14)"/>`;
+    for (let a = 0; a < 360; a += 10) {
+      const r1 = a % 90 === 0 ? R - 8 : a % 30 === 0 ? R - 5 : R - 3, t = (a * Math.PI) / 180;
+      svg += `<line x1="${(cx + Math.sin(t) * R).toFixed(1)}" y1="${(cy - Math.cos(t) * R).toFixed(1)}" x2="${(cx + Math.sin(t) * r1).toFixed(1)}" y2="${(cy - Math.cos(t) * r1).toFixed(1)}" stroke="rgba(255,255,255,${a % 30 ? 0.15 : 0.35})"/>`;
+    }
+    [["N", 0], ["E", 90], ["S", 180], ["W", 270]].forEach(([l, a]) => {
+      const t = (a * Math.PI) / 180;
+      svg += `<text x="${(cx + Math.sin(t) * (R - 15)).toFixed(1)}" y="${(cy - Math.cos(t) * (R - 15) + 3.5).toFixed(1)}" text-anchor="middle" font-size="9.5" fill="rgba(255,255,255,.42)">${l}</text>`;
+    });
+    if (o.variable) {
+      const [v1, v2] = o.variable, t1 = (v1 * Math.PI) / 180, t2 = (v2 * Math.PI) / 180, span = (v2 - v1 + 360) % 360;
+      svg += `<path d="M${(cx + Math.sin(t1) * R).toFixed(1)} ${(cy - Math.cos(t1) * R).toFixed(1)} A${R} ${R} 0 ${span > 180 ? 1 : 0} 1 ${(cx + Math.sin(t2) * R).toFixed(1)} ${(cy - Math.cos(t2) * R).toFixed(1)}" fill="none" stroke="#ffd84a" stroke-opacity=".45" stroke-width="5"/>`;
+    }
+    // Runways: wider for longer ones, the best-aligned one highlighted.
+    rwys.forEach(([a, b, hdg, len], i) => {
+      const [x1, y1, x2, y2] = segs[i];
+      const [p1x, p1y] = P(x1, y1), [p2x, p2y] = P(x2, y2);
+      const L = Math.hypot(p2x - p1x, p2y - p1y) || 1, ux = (p2x - p1x) / L, uy = (p2y - p1y) / L;
+      const w = 2.5 + 3 * ((len || 0) / (longest || 1)), nx = -uy * w, ny = ux * w;
+      const on = best && (best.id === a || best.id === b);
+      svg += `<path d="M${(p1x + nx).toFixed(1)} ${(p1y + ny).toFixed(1)}L${(p2x + nx).toFixed(1)} ${(p2y + ny).toFixed(1)}L${(p2x - nx).toFixed(1)} ${(p2y - ny).toFixed(1)}L${(p1x - nx).toFixed(1)} ${(p1y - ny).toFixed(1)}Z" fill="${on ? "rgba(63,207,106,.55)" : "#3b4160"}" stroke="${on ? "#3fcf6a" : "rgba(255,255,255,.5)"}" stroke-width=".8"/>`;
+      if (L > 18) svg += `<line x1="${(p1x + ux * 3).toFixed(1)}" y1="${(p1y + uy * 3).toFixed(1)}" x2="${(p2x - ux * 3).toFixed(1)}" y2="${(p2y - uy * 3).toFixed(1)}" stroke="rgba(255,255,255,.55)" stroke-width=".6" stroke-dasharray="2.5 2"/>`;
+      // Each end's number just beyond that end (the low end is where you'd land on runway "a").
+      [[a, p1x - ux * 8, p1y - uy * 8], [b, p2x + ux * 8, p2y + uy * 8]].forEach(([id, tx, ty]) => {
+        if (!id) return;
+        const hi = best && best.id === id;
+        svg += `<text x="${tx.toFixed(1)}" y="${(ty + 3).toFixed(1)}" text-anchor="middle" ${MONO} font-size="8.5" fill="${hi ? "#3fcf6a" : "rgba(255,255,255,.75)"}"${hi ? ' font-weight="600"' : ""}>${esc(id)}</text>`;
+      });
+    });
+    // Wind arrow from the direction the wind blows from, pointing in.
+    if (o.dir != null && o.spd) {
+      const t = (o.dir * Math.PI) / 180, sx = Math.sin(t), sy = -Math.cos(t);
+      const r0 = R + 13, r1 = R - 20;
+      const hx = cx + sx * r1, hy = cy + sy * r1;
+      svg += `<line x1="${(cx + sx * r0).toFixed(1)}" y1="${(cy + sy * r0).toFixed(1)}" x2="${(cx + sx * (r1 + 7)).toFixed(1)}" y2="${(cy + sy * (r1 + 7)).toFixed(1)}" stroke="#ffd84a" stroke-width="3" stroke-linecap="round"/>`
+        + `<path d="M${hx.toFixed(1)} ${hy.toFixed(1)}L${(hx + sx * 10 - sy * 5.5).toFixed(1)} ${(hy + sy * 10 + sx * 5.5).toFixed(1)}L${(hx + sx * 10 + sy * 5.5).toFixed(1)} ${(hy + sy * 10 - sx * 5.5).toFixed(1)}Z" fill="#ffd84a"/>`;
+    } else {
+      svg += `<text x="${cx}" y="${cy + 4}" text-anchor="middle" font-size="11" fill="#ffd84a" style="paint-order:stroke" stroke="#0b0f26" stroke-width="3">${o.spd === 0 ? "Calm" : o.spd != null ? `Variable ${o.spd} kt` : "Wind missing"}</text>`;
+    }
+
+    // Right: the best runway end with the wind split into headwind and crosswind.
+    const windTxt = o.spd === 0 ? "Calm" : o.dir == null ? (o.spd != null ? `VRB ${o.spd}${o.gust ? `G${o.gust}` : ""} kt` : "—") : `${String(o.dir).padStart(3, "0")}° ${o.spd}${o.gust ? `G${o.gust}` : ""} kt`;
+    svg += `<text x="214" y="14" font-size="10.5" fill="rgba(255,255,255,.6)">Wind</text><text x="${W}" y="14" text-anchor="end" ${MONO} font-size="11" fill="#ffd84a">${esc(windTxt)}</text>`;
+    if (o.variable) svg += `<text x="${W}" y="27" text-anchor="end" ${MONO} font-size="8.5" fill="rgba(255,255,255,.5)">varying ${pad3(o.variable[0])}°–${pad3(o.variable[1])}°</text>`;
+    if (best) {
+      const ox = 266, oy = 156, s = 52 / Math.max(o.gust || o.spd, 10);
+      const tx = ox + best.cross * s, ty = oy - best.head * s;   // tip of the wind vector (where it comes from)
+      svg += `<rect x="${ox - 6}" y="64" width="12" height="138" rx="1.5" fill="#3b4160" stroke="rgba(255,255,255,.5)" stroke-width=".8"/><line x1="${ox}" x2="${ox}" y1="68" y2="198" stroke="rgba(255,255,255,.55)" stroke-width=".6" stroke-dasharray="3 2.5"/>`
+        + `<text x="${ox}" y="211" text-anchor="middle" ${MONO} font-size="9.5" font-weight="600" fill="#3fcf6a">${esc(best.id)}</text><path d="M${ox} 56l-4 6h8z" fill="#3fcf6a"/>`
+        + `<line x1="${tx.toFixed(1)}" y1="${ty.toFixed(1)}" x2="${ox}" y2="${ty.toFixed(1)}" stroke="#4ad1ff" stroke-width="2"/>`
+        + `<line x1="${ox}" y1="${ty.toFixed(1)}" x2="${ox}" y2="${oy}" stroke="${best.head >= 0 ? "#3fcf6a" : "#ff4d4d"}" stroke-width="2"/>`
+        + `<line x1="${tx.toFixed(1)}" y1="${ty.toFixed(1)}" x2="${ox}" y2="${oy}" stroke="#ffd84a" stroke-width="1.6" stroke-dasharray="4 2.5"/><circle cx="${ox}" cy="${oy}" r="2.5" fill="#fff"/>`;
+      const hd = Math.round(best.head), xw = Math.round(Math.abs(best.cross));
+      svg += `<text x="214" y="39" ${MONO} font-size="9" fill="${hd >= 0 ? "#3fcf6a" : "#ff4d4d"}">${hd >= 0 ? `Head ${hd}` : `Tail ${-hd}`} kt</text>`
+        + `<text x="214" y="51" ${MONO} font-size="9" fill="#4ad1ff">Cross ${xw}${xw ? (best.cross > 0 ? " R" : " L") : ""}${best.gx != null ? ` (G${Math.round(Math.abs(best.gx))})` : ""} kt</text>`;
+    }
+    const row = (e, i) => {
+      const hd = Math.round(e.head), xw = Math.round(Math.abs(e.cross)), gx = e.gx != null ? Math.round(Math.abs(e.gx)) : null;
+      const xc = (gx ?? xw) >= 20 ? "#ff6b6b" : (gx ?? xw) >= 12 ? "#ffbf47" : "inherit";
+      return `<tr${i === 0 ? ' class="best"' : ""}><td>${esc(e.id)}</td><td style="color:${hd < 0 ? "#ff6b6b" : "inherit"}">${hd >= 0 ? `${hd} head` : `${-hd} tail`}</td>`
+        + `<td style="color:${xc}">${xw}${xw ? (e.cross > 0 ? " R" : " L") : ""}${gx != null ? `<small>gusts ${gx}</small>` : ""}</td><td>${e.len ? `${e.len.toLocaleString()} ft` : "—"}</td></tr>`;
+    };
+    const head = `<thead><tr><th>Runway</th><th>Head / tail</th><th>Crosswind</th><th>Length</th></tr></thead>`;
+    // The four ends most into the wind, the rest folded away.
+    const table = ends.length ? `<table class="t rwy">${head}<tbody>${ends.slice(0, 4).map(row).join("")}</tbody></table>`
+      + (ends.length > 4 ? `<details><summary class="note">All ${ends.length} runway ends</summary><table class="t rwy">${head}<tbody>${ends.slice(4).map((e, i) => row(e, i + 4)).join("")}</tbody></table></details>` : "") : "";
+    return `<h5 class="sub">Runways and wind</h5><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Runway layout with the wind ${esc(windTxt)}${best ? `; best aligned runway ${esc(best.id)}` : ""}">${svg}</svg>
+      ${table}
+      <p class="note" style="margin-top:.3rem">Knots, against true runway headings; layout ${hasPos ? "to scale" : "schematic"}, north up. ${best ? "Green is the end most into the wind, not necessarily the one in use. " : ""}Runways from OurAirports.</p>`;
+  }
+  const pad3 = (n) => String(n).padStart(3, "0");
+
+  // Temperature and dewpoint on one scale, with the spread, humidity and what they suggest.
+  function tempGraphic(o) {
+    if (o.temp == null) return "";
+    const W = 336, H = 46, X0 = 6, X1 = 330;
+    const lo = Math.floor((Math.min(o.temp, o.dew ?? o.temp) - 8) / 10) * 10, hi = Math.max(lo + 40, Math.ceil((o.temp + 8) / 10) * 10);
+    const x = (t) => X0 + ((t - lo) / (hi - lo)) * (X1 - X0);
+    let svg = `<defs><linearGradient id="tgrad" x1="0" x2="1"><stop offset="0" stop-color="#4f8dff"/><stop offset="${((0 - lo) / (hi - lo)).toFixed(2)}" stop-color="#6fe3e8"/><stop offset="1" stop-color="#ff9548"/></linearGradient></defs>`
+      + `<rect x="${X0}" y="24" width="${X1 - X0}" height="4" rx="2" fill="url(#tgrad)" opacity=".35"/>`;
+    for (let t = lo; t <= hi; t += 10) svg += `<text x="${x(t).toFixed(1)}" y="${H - 2}" text-anchor="middle" ${MONO} font-size="8.5" fill="${t === 0 ? "#6fe3e8" : "rgba(255,255,255,.42)"}">${t}°</text>`;
+    if (lo < 0 && hi > 0) svg += `<line x1="${x(0).toFixed(1)}" x2="${x(0).toFixed(1)}" y1="19" y2="33" stroke="#6fe3e8" stroke-dasharray="2 2"/>`;
+    if (o.dew != null) {
+      svg += `<rect x="${x(o.dew).toFixed(1)}" y="22" width="${Math.max(1, x(o.temp) - x(o.dew)).toFixed(1)}" height="8" fill="rgba(255,255,255,.18)"/>`
+        + `<circle cx="${x(o.dew).toFixed(1)}" cy="26" r="5" fill="#4ad1ff"/><text x="${(x(o.dew) - (o.temp - o.dew < 6 ? 3 : 0)).toFixed(1)}" y="13" text-anchor="${o.temp - o.dew < 6 ? "end" : "middle"}" ${MONO} fill="#4ad1ff">dew ${o.dew}°</text>`;
+    }
+    svg += `<circle cx="${x(o.temp).toFixed(1)}" cy="26" r="5" fill="#ff9548"/><text x="${(x(o.temp) + (o.dew != null && o.temp - o.dew < 6 ? 3 : 0)).toFixed(1)}" y="13" text-anchor="${o.dew != null && o.temp - o.dew < 6 ? "start" : "middle"}" ${MONO} fill="#ff9548">temp ${o.temp}°</text>`;
+    const notes = [];
+    if (o.dew != null) {
+      const sp = o.temp - o.dew;
+      const rh = 100 * Math.exp((17.625 * o.dew) / (243.04 + o.dew) - (17.625 * o.temp) / (243.04 + o.temp));
+      notes.push(`Spread ${sp}°C`, `humidity ${Math.round(rh)}%`);
+      if (sp > 0) notes.push(`cumulus base ≈ ${(Math.round((sp * 400) / 100) * 100).toLocaleString()} ft above the field`);
+      if (sp <= 3 && o.temp > -10) notes.push(`<b style="color:#ffbf47">small spread: fog or low cloud likely, especially as it cools</b>`);
+    }
+    if (o.temp <= 3 && (o.layers.length || /RA|DZ|SN|PL|FG|BR/.test(o.wx))) notes.push(`<b style="color:#6fe3e8">near or below freezing with moisture: watch for icing</b>`);
+    return `<h5 class="sub">Temperature and dewpoint (°C)</h5><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Temperature ${o.temp} and dewpoint ${o.dew ?? "missing"} °C">${svg}</svg>
+      <p class="note" style="margin-top:.2rem">${notes.join(" · ")}</p>`;
+  }
+
+  function metarGraphics(m, raw) {
+    const o = observation(m, raw);
+    const ap = state.airportsData?.[m.station_id];
+    return `<div class="gfx">${wxChips(o.wx)}${categoryGraphic(o)}${skyGraphic(o, ap ? ap[0] : null)}${ap ? runwayGraphic(o, ap[1]) : ""}${tempGraphic(o)}</div>`;
+  }
+
+  // —— Density altitude (field data from data/airports.json) ——————————————
   async function loadAirports() {
     if (!state.airports) state.airports = fetch("data/airports.json").then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
     return state.airports;
@@ -659,27 +940,12 @@
   function performanceRows(m) {
     const ap = state.airportsData?.[m.station_id];
     if (!ap) { if (!state.airportsData) loadAirports().then((d) => { state.airportsData = d; if (state.view === "airports") render(); }); return ""; }
-    const [elev, rwys] = ap;
+    const [elev] = ap;
     let html = "";
     if (elev != null && m.altim_in_hg && m.temp_c != null) {
       const pa = elev + (29.92 - m.altim_in_hg) * 1000;
       const da = pa + 120 * (m.temp_c - (15 - 2 * (pa / 1000)));
       html += `<dt>Density alt.</dt><dd>${(Math.round(da / 10) * 10).toLocaleString()} ft<small style="display:block;color:var(--text3)">Field ${Math.round(elev).toLocaleString()} ft · pressure alt. ${(Math.round(pa / 10) * 10).toLocaleString()} ft</small></dd>`;
-    }
-    const dir = typeof m.winddir === "number" ? m.winddir : Number.isFinite(+m.winddir) ? +m.winddir : null;
-    if (rwys.length && m.wind_speed_kt != null) {
-      if (m.wind_speed_kt === 0) html += `<dt>Runway wind</dt><dd>Calm</dd>`;
-      else if (dir == null) html += `<dt>Runway wind</dt><dd>Variable, up to ${m.wind_gust_kt || m.wind_speed_kt} kt from any direction</dd>`;
-      else {
-        // Each runway end, scored by headwind; show the best one and its crosswind (with gusts).
-        const ends = rwys.flatMap(([a, b, hdg, len]) => [[a, hdg, len], [b, (hdg + 180) % 360, len]]).filter(([id]) => id);
-        const comp = (hdg, spd) => { const r = ((dir - hdg) * Math.PI) / 180; return { head: spd * Math.cos(r), cross: spd * Math.sin(r) }; };
-        const rows = ends.map(([id, hdg, len]) => ({ id, len, ...comp(hdg, m.wind_speed_kt), gx: m.wind_gust_kt ? comp(hdg, m.wind_gust_kt).cross : null }))
-          .sort((a, b) => b.head - a.head);
-        const side = (c) => (Math.abs(c) < 0.5 ? "" : c > 0 ? " from the right" : " from the left");
-        const fmt = (r) => `Rwy ${esc(r.id)}: ${Math.round(Math.abs(r.cross))} kt crosswind${side(r.cross)}${r.gx != null ? ` (gusts ${Math.round(Math.abs(r.gx))})` : ""}, ${r.head >= 0 ? `${Math.round(r.head)} kt headwind` : `${Math.round(-r.head)} kt tailwind`}`;
-        html += `<dt>Runway wind</dt><dd>${fmt(rows[0])}${rows.slice(1, 3).map((r) => `<small style="display:block;color:var(--text3)">${fmt(r)}</small>`).join("")}</dd>`;
-      }
     }
     return html;
   }

@@ -31,6 +31,14 @@
     #views { flex-wrap: wrap; column-gap: 1.1rem; row-gap: 0; align-content: flex-start; flex: none; }
     .search.past { flex-wrap: wrap; }
     .search.past input { flex: 1 1 8rem; min-width: 0; }
+    /* METAR graphics in the Airports view. */
+    .wxchips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.6rem 0 0; }
+    .wxchips span { font-size: 0.74rem; padding: 0.1rem 0.5rem; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: rgba(255, 255, 255, 0.85); }
+    .wxchips .sev { background: rgba(255, 77, 77, 0.2); color: #ff9b9b; }
+    .wxchips .cold { background: rgba(111, 227, 232, 0.15); color: #a6f0f3; }
+    table.rwy td:first-child { font-weight: 600; }
+    table.rwy tr.best td:first-child { color: #3fcf6a; }
+    table.rwy small { display: block; color: var(--text3); }
   </style>
 </head>
 <body class="console">
@@ -111,6 +119,6 @@
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>
