@@ -28,6 +28,9 @@
     .search input { text-transform: uppercase; }
     .pad h5.sub .all { float: right; font-size: 0.72rem; color: var(--text3); }
     .pad h5.sub .all a { text-decoration: none; }
+    #views { flex-wrap: wrap; column-gap: 1.1rem; row-gap: 0; align-content: flex-start; flex: none; }
+    .search.past { flex-wrap: wrap; }
+    .search.past input { flex: 1 1 8rem; min-width: 0; }
   </style>
 </head>
 <body class="console">
@@ -58,6 +61,7 @@
         <button role="tab" data-view="advisories" aria-selected="false">Advisories</button>
         <button role="tab" data-view="pireps" aria-selected="false">PIREPs</button>
         <button role="tab" data-view="winds" aria-selected="false">Winds aloft</button>
+        <button role="tab" data-view="past" aria-selected="false">Look back</button>
       </div>
       <div class="scroll" id="panel"><p class="empty">Loading…</p></div>
       <div class="side__foot">
@@ -107,6 +111,6 @@
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>
