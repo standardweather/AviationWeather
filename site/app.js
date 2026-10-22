@@ -1627,6 +1627,14 @@
     const params = new URLSearchParams(location.search);
     const viewParam = params.get("view");
     if (["advisories", "pireps", "winds", "route", "past"].includes(viewParam)) { state.view = viewParam; setTabs(); }
+    // &near=lat,lon instead of ids (from the case file): the three nearest reporting airports within 60 nm.
+    if (viewParam === "past" && !params.get("ids") && params.get("near") && params.get("t")) {
+      const [la, lo] = params.get("near").split(",").map(Number);
+      const ids = Object.values(state.metarIndex).filter((m) => /^[KPT][A-Z0-9]{3}$/.test(m.station_id))
+        .map((m) => ({ id: m.station_id, km: kmBetween(la, lo, m.lat, m.lon) })).filter((m) => m.km <= 60 * NM).sort((a, b) => a.km - b.km).slice(0, 3).map((m) => m.id);
+      if (ids.length) params.set("ids", ids.join(" "));
+      else { state.past = { error: "No reporting airport within 60 nm of the place.", none: true }; render(); }
+    }
     if (viewParam === "past" && params.get("ids") && params.get("t")) {
       const tm = params.get("t").match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})Z?$/);
       state.pastForm = { ids: params.get("ids"), t: tm ? `${tm[1]}-${tm[2]}-${tm[3]} ${tm[4]}${tm[5]}Z` : params.get("t"), hours: [1, 3, 6, 12].includes(+params.get("h")) ? +params.get("h") : 3 };
@@ -1644,6 +1652,26 @@
     setInterval(() => { if (!state.radar.timer) loadRadar(false); loadSat(); }, 4 * 60000);
     setInterval(() => loadWinds().then(() => { if (state.view === "winds") render(); }).catch(() => {}), 30 * 60000);
   }
+
+  // —— Case file: the home page's case file (/case.html) opens ?view=past&near=…&t=… in a frame and reads the record here ——
+  window.SWCase = {
+    status() {
+      const p = state.past;
+      if (!p) return "loading";
+      if (p.none) return "none";
+      if (p.error) return "error";
+      return p.status === "ready" && p.airports.every((a) => a.taf !== undefined) && p.sigmets != null && p.gairmets != null && p.pireps != null ? "ready" : "loading";
+    },
+    error: () => state.past?.error || "",
+    section() {
+      const panel = document.createElement("div");
+      panel.innerHTML = pastView();
+      panel.querySelector("form")?.remove();
+      panel.querySelectorAll(".satpick, .actions").forEach((el) => el.remove());
+      panel.querySelectorAll("details").forEach((d) => d.setAttribute("open", ""));
+      return { title: `AviationWeather: ${state.past.ids.join(", ")}`, html: panel.innerHTML };
+    },
+  };
 
   init();
 })();
