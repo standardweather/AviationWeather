@@ -21,14 +21,13 @@
   <meta name="color-scheme" content="dark" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <!-- Shared theme and console layout from the main site (standardweather.github.io repo). -->
-  <link rel="stylesheet" href="/css/site.css" />
-  <link rel="stylesheet" href="/css/console.css?v=1" />
+  <link rel="stylesheet" href="/css/site.css?v=20261023a" />
+  <link rel="stylesheet" href="/css/console.css?v=2" />
   <style>
     /* AviationWeather-only pieces; the shared console layout is in /css/console.css. */
     .search input { text-transform: uppercase; }
     .pad h5.sub .all { float: right; font-size: 0.72rem; color: var(--text3); }
     .pad h5.sub .all a { text-decoration: none; }
-    #views { flex-wrap: wrap; column-gap: 1.1rem; row-gap: 0; align-content: flex-start; flex: none; }
     .search.past { flex-wrap: wrap; }
     .search.past input { flex: 1 1 8rem; min-width: 0; }
     /* METAR graphics in the Airports view. */
@@ -44,18 +43,17 @@
 <body class="console">
   <nav class="site-nav" aria-label="Primary">
     <div class="site-nav__inner">
-      <a class="site-nav__brand" href="/">
+      <a class="site-nav__brand" href="/" title="Standard Weather home">
         <img src="/assets/logo-light.png" width="32" height="32" alt="" />
         Standard Weather
       </a>
       <ul class="site-nav__links">
-        <li><a href="/">Home</a></li>
-        <li><a href="/about.html">About</a></li>
         <li><a href="/PastWeather/">PastWeather</a></li>
         <li><a href="/NowWeather/">NowWeather</a></li>
         <li><a href="/FutureWeather/">FutureWeather</a></li>
         <li><a href="/TropicalWeather/">TropicalWeather</a></li>
         <li><a href="/AviationWeather/" aria-current="page">AviationWeather</a></li>
+        <li><a href="/about.html">About</a></li>
       </ul>
     </div>
   </nav>
@@ -73,37 +71,41 @@
       </div>
       <div class="scroll" id="panel"><p class="empty">Loading…</p></div>
       <div class="side__foot">
-        <h4>Map layers</h4>
-        <div class="checks" id="layers">
-          <label><input type="checkbox" data-layer="metars" checked /> Flight categories</label>
-          <label><input type="checkbox" data-layer="radar" checked /> Radar</label>
-          <label><input type="checkbox" data-layer="sigmets" checked /> SIGMETs &amp; CWAs</label>
-          <label><input type="checkbox" data-layer="gairmets" checked /> G-AIRMETs</label>
-          <label><input type="checkbox" data-layer="pireps" checked /> PIREPs</label>
-          <label><input type="checkbox" data-layer="tcf" /> Convective fcst (TCF)</label>
-          <label><input type="checkbox" data-layer="winds" /> Winds aloft <small id="windAltLabel" style="color:var(--text3)"></small></label>
-          <label><input type="checkbox" data-layer="tfr" checked /> TFRs</label>
-        </div>
-        <div class="satpick" id="hazpick" role="group" aria-label="Model turbulence and icing">
-          <span>Model</span>
-          <button data-haz="off" aria-pressed="true">Off</button>
-          <button data-haz="turb" aria-pressed="false">Turbulence</button>
-          <button data-haz="icing" aria-pressed="false">Icing</button>
-        </div>
-        <div class="satpick" id="satpick" role="group" aria-label="Satellite">
-          <span>Satellite</span>
-          <button data-sat="off" aria-pressed="false">Off</button>
-          <button data-sat="ir" aria-pressed="true">IR</button>
-          <button data-sat="vis" aria-pressed="false">Visible</button>
-          <button data-sat="wv" aria-pressed="false">Water vapor</button>
-          <small id="satTime"></small>
-        </div>
         <p class="disclaimer">Not for flight planning or navigation. Use an official briefing (<a href="https://aviationweather.gov/">aviationweather.gov</a>, 1-800-WX-BRIEF).</p>
       </div>
     </aside>
 
     <section class="stage" aria-label="Map">
       <div id="map"></div>
+      <details class="layers" id="layerBox">
+        <summary><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2 8l10 5 10-5-10-5Z"/><path d="m2 13 10 5 10-5"/></svg> Layers</summary>
+        <div class="layers__body">
+          <div class="checks" id="layers">
+            <label><input type="checkbox" data-layer="metars" checked /> Flight categories</label>
+            <label><input type="checkbox" data-layer="radar" checked /> Radar</label>
+            <label><input type="checkbox" data-layer="sigmets" checked /> SIGMETs &amp; CWAs</label>
+            <label><input type="checkbox" data-layer="gairmets" checked /> G-AIRMETs</label>
+            <label><input type="checkbox" data-layer="pireps" checked /> PIREPs</label>
+            <label><input type="checkbox" data-layer="tcf" /> Convective fcst (TCF)</label>
+            <label><input type="checkbox" data-layer="winds" /> Winds aloft <small id="windAltLabel" style="color:var(--text3)"></small></label>
+            <label><input type="checkbox" data-layer="tfr" checked /> TFRs</label>
+          </div>
+          <div class="satpick" id="hazpick" role="group" aria-label="Model turbulence and icing">
+            <span>Turbulence &amp; icing (model)</span>
+            <button data-haz="off" aria-pressed="true">Off</button>
+            <button data-haz="turb" aria-pressed="false">Turbulence</button>
+            <button data-haz="icing" aria-pressed="false">Icing</button>
+          </div>
+          <div class="satpick" id="satpick" role="group" aria-label="Satellite">
+            <span>Satellite</span>
+            <button data-sat="off" aria-pressed="false">Off</button>
+            <button data-sat="ir" aria-pressed="true">IR</button>
+            <button data-sat="vis" aria-pressed="false">Visible</button>
+            <button data-sat="wv" aria-pressed="false">Water vapor</button>
+            <small id="satTime"></small>
+          </div>
+        </div>
+      </details>
       <div class="status" id="status" hidden></div>
       <div class="scrub" id="scrub">
         <button id="play" aria-label="Play radar loop">▶</button>
@@ -119,6 +121,6 @@
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>
