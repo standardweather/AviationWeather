@@ -1436,7 +1436,7 @@
     else html += p.pireps.length ? `<table class="t"><tbody>${p.pireps.map((r) => `<tr data-ll="${r.lat},${r.lon}"><td>${hhmmZ(r.t)}${r.urgent ? "<small>URGENT</small>" : ""}</td><td style="font-size:.7rem">${esc(r.report)}<small>${Math.round(r.nm)} nm away</small></td></tr>`).join("")}</tbody></table>`
       : `<p class="note">None reported.</p>`;
     html += `<div class="actions" style="display:flex;gap:1rem;margin-top:.8rem;font-size:.82rem"><a href="#" data-pastprint="1">Print record</a><a href="#" data-pastcsv="1">METARs as CSV</a>
-        <a href="/?${new URLSearchParams({ request: "report", place: p.ids.join(", "), when: `${isoZ(t).replace("T", " ")} UTC`, link: location.href })}#contact">Request a certified report</a></div>
+        <a href="/ForensicWeather/?${new URLSearchParams({ request: "report", place: p.ids.join(", "), when: `${isoZ(t).replace("T", " ")} UTC`, link: location.href })}#contact">Request a certified report</a></div>
       <p class="note">METARs, TAFs, SIGMETs, G-AIRMETs and PIREPs from the NWS and Aviation Weather Center, archived by the Iowa Environmental Mesonet (Iowa State University). G-AIRMET snapshot shown: ${p.gairmetAt ? esc(ddhhZ(p.gairmetAt)) : "—"}. Map radar: NEXRAD composite at ${esc(hhmmZ(Math.floor(t / 300e3) * 300e3))}.
         Not an official weather briefing record; FAA and NTSB use the archived products themselves.</p></div>`;
     return html;
