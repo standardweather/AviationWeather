@@ -38,6 +38,9 @@
     table.rwy td:first-child { font-weight: 600; }
     table.rwy tr.best td:first-child { color: #3fcf6a; }
     table.rwy small { display: block; color: var(--text3); }
+    .artcc-label { background: none; border: 0; box-shadow: none; color: #c9d2f0; font: 600 0.72rem var(--mono); letter-spacing: 0.08em; opacity: 0.8;
+      text-shadow: 0 0 3px #0b1022, 0 0 6px #0b1022; padding: 0; }
+    .artcc-label::before { display: none; }
   </style>
 </head>
 <body class="console">
@@ -90,6 +93,7 @@
             <label><input type="checkbox" data-layer="tcf" /> Convective fcst (TCF)</label>
             <label><input type="checkbox" data-layer="winds" /> Winds aloft <small id="windAltLabel" style="color:var(--text3)"></small></label>
             <label><input type="checkbox" data-layer="tfr" checked /> TFRs</label>
+            <label><input type="checkbox" data-layer="artcc" /> ARTCC boundaries</label>
           </div>
           <div class="satpick" id="hazpick" role="group" aria-label="Model turbulence and icing">
             <span>Turbulence &amp; icing (model)</span>
@@ -122,6 +126,6 @@
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

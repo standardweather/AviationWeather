@@ -7,6 +7,7 @@
  *                                            winds and temperatures aloft (FD bulletins)
  * Collected by GitHub Actions into data/ (tools/collect.py), because these sources send no CORS headers:
  *   FAA TFR list and shapes (tfr.json), OurAirports field elevations and runways (airports.json)
+ * FAA ARTCC boundaries, simplified (airmetcast/artcc.json, shared with AIRMETcast and FutureWeather)
  * From FutureWeather (same site): GFS-derived turbulence and icing overlays for the hour nearest now
  * Iowa Environmental Mesonet archives (Look back): past METARs, TAFs, SIGMETs, G-AIRMETs and PIREPs
  */
@@ -78,7 +79,7 @@
     pireps: [], tcf: null, selected: null,
     advOn: Object.fromEntries(Object.entries(ADV_PRODUCTS).flatMap(([prod, [, hz, on]]) => hz.map((h) => [`${prod}|${h}`, on]))),
     sat: { kind: "ir", layer: null, time: null },
-    on: { metars: true, radar: true, sigmets: true, gairmets: true, pireps: true, tcf: false, winds: false, tfr: true },
+    on: { metars: true, radar: true, sigmets: true, gairmets: true, pireps: true, tcf: false, winds: false, tfr: true, artcc: false },
     tfr: null, airports: null, hazard: "off",
     past: null, pastForm: { ids: "", t: "", hours: 3 },
     nws: null, winds: null, windsError: false, windFcst: "6", windAlt: "9000", route: null,
@@ -92,9 +93,10 @@
   if (!linked) map.fitBounds(CONUS);
   L.control.zoom({ position: "topright" }).addTo(map);
   map.attributionControl.setPrefix("");
-  [["sat", 260], ["radar", 300], ["hazard", 320], ["tcf", 340], ["tfr", 350], ["route", 360], ["gairmet", 380], ["sigmet", 420], ["pastRadar", 425], ["pastPoly", 430], ["highlight", 450], ["winds", 600], ["points", 620], ["pastPts", 630], ["labels", 640]]
+  [["sat", 260], ["radar", 300], ["hazard", 320], ["tcf", 340], ["artcc", 345], ["tfr", 350], ["route", 360], ["gairmet", 380], ["sigmet", 420], ["pastRadar", 425], ["pastPoly", 430], ["highlight", 450], ["winds", 600], ["points", 620], ["pastPts", 630], ["labels", 640]]
     .forEach(([n, z]) => { map.createPane(n).style.zIndex = z; });
   map.getPane("labels").style.pointerEvents = "none";
+  map.getPane("artcc").style.pointerEvents = "none";
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, attribution: "Esri" }).addTo(map);
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, pane: "labels", opacity: 0.85 }).addTo(map);
   map.attributionControl.addAttribution("NOAA AWC · nowCOAST");
@@ -103,7 +105,7 @@
   const layers = {
     metars: L.layerGroup(), sigmets: L.layerGroup(), gairmets: L.layerGroup(), pireps: L.layerGroup(), tcf: L.layerGroup(),
     highlight: L.layerGroup().addTo(map), winds: L.layerGroup(), route: L.layerGroup().addTo(map),
-    tfr: L.layerGroup(), hazard: L.layerGroup().addTo(map), past: L.layerGroup().addTo(map),
+    tfr: L.layerGroup(), hazard: L.layerGroup().addTo(map), past: L.layerGroup().addTo(map), artcc: L.layerGroup(),
   };
   Object.entries(state.on).forEach(([k, v]) => { if (v && layers[k]) layers[k].addTo(map); });
 
@@ -982,7 +984,9 @@
     if (!gfs || !prod) { legendEl.innerHTML = `<h5 class="sub">${HAZARD[state.hazard]} · unavailable</h5>`; return; }
     const t0 = new Date(gfs.init).getTime();
     const fhr = gfs.hours.reduce((b, h) => (Math.abs(t0 + h * 3600e3 - Date.now()) < Math.abs(t0 + b * 3600e3 - Date.now()) ? h : b), gfs.hours[0]);
-    L.imageOverlay(`/FutureWeather/img/gfs/${state.hazard}_f${String(fhr).padStart(3, "0")}.png?run=${encodeURIComponent(gfs.cycle)}`, info.bounds, { pane: "hazard", opacity: 0.7, interactive: false }).addTo(layers.hazard);
+    // FutureWeather draws the shading and its contour lines as separate layers; older runs have one image.
+    const f3 = String(fhr).padStart(3, "0");
+    (prod.layers || [null]).forEach((l) => L.imageOverlay(`/FutureWeather/img/gfs/${state.hazard}${l ? `-${l.id}` : ""}_f${f3}.png?run=${encodeURIComponent(gfs.cycle)}`, info.bounds, { pane: "hazard", opacity: 0.7, interactive: false }).addTo(layers.hazard));
     const lg = prod.legend;
     legendEl.innerHTML = `<h5 class="sub">${HAZARD[state.hazard]} · GFS ${hhmmZ(t0)} F${String(fhr).padStart(3, "0")}, valid ${ddhhZ(t0 + fhr * 3600e3)}</h5>
       <div class="key">${lg.colors.map((c, i) => `<span><i style="background:${c}"></i>${i === 0 ? "light" : i === lg.colors.length - 1 ? "severe" : ""}</span>`).join("")}</div>
@@ -1602,11 +1606,27 @@
     loadSat();
   });
 
+  // ARTCC boundaries: thin gray lines with each center's identifier at its middle, loaded the first time they're turned on.
+  let artcc = null;
+  async function loadArtcc() {
+    artcc ||= fetch("airmetcast/artcc.json").then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const gj = await artcc;
+    if (!gj) { artcc = null; return; }
+    if (layers.artcc.getLayers().length) return;
+    const renderer = L.svg({ pane: "artcc" });
+    L.geoJSON(gj, { renderer, interactive: false, style: { color: "#c9d2f0", weight: 1.1, opacity: 0.6, fill: false } }).addTo(layers.artcc);
+    gj.features.forEach((f) => {
+      const c = L.geoJSON(f).getBounds().getCenter();
+      layers.artcc.addLayer(L.tooltip({ permanent: true, direction: "center", className: "artcc-label", pane: "labels" }).setLatLng(c).setContent(esc(f.properties.id)));
+    });
+  }
+
   $("layers").addEventListener("change", (e) => {
     const k = e.target.dataset?.layer;
     if (!k) return;
     state.on[k] = e.target.checked;
     if (k === "radar") { loadRadar(true); return; }
+    if (k === "artcc" && e.target.checked) loadArtcc();
     if (k === "winds" && e.target.checked && !state.winds) loadWinds().catch(() => {});
     e.target.checked ? layers[k].addTo(map) : layers[k].remove();
   });
