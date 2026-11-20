@@ -9,6 +9,7 @@ Live aviation weather console for [Standard Weather](https://standardweather.git
 - Graphics with each airport's METAR: cloud layers and heights with the estimated freezing level, visibility and ceiling against the flight-category limits, the runways to scale with the wind and each runway end's headwind, tailwind and crosswind, temperature and dewpoint spread, and present weather in plain words
 - Density altitude and runway winds — field elevations and runways (headings, lengths, widths and end positions) from OurAirports (public domain), in `site/data/airports.json`
 - Model turbulence and icing — FutureWeather's GFS overlays for the hour nearest now
+- Winds and temperatures aloft — GFS model winds at the old NWS FD bulletin points and levels (3,000 ft to FL390), 6, 12 or 24 hours ahead, written by FutureWeather's `make_airmetcast.py`. The NWS retired its US winds aloft bulletin along with the NAM, so this is model output, not an official forecast
 - PIREP heatmap (PIREPs tab): turbulence or icing reports over the last 3, 6 or 12 hours, below or above FL180, summed into 1° cells by intensity, from the Iowa Environmental Mesonet's national PIREP archive (`pireps.py`, CORS-enabled)
 - Look back: the weather at up to six airports at a past UTC time — METARs and specials, the TAF in effect, SIGMETs, convective SIGMETs and G-AIRMETs over or near each airport, PIREPs within 100 nm and the NEXRAD composite on the map — from the Iowa Environmental Mesonet's archives (CORS-enabled), printable and as CSV
 
