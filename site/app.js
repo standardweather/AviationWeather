@@ -366,7 +366,9 @@
     for (let t = Math.ceil(t0 / 10800e3) * 10800e3; t <= t1; t += 10800e3) {
       const h = new Date(t).getUTCHours();
       svg += `<line x1="${x(t).toFixed(1)}" x2="${x(t).toFixed(1)}" y1="0" y2="23" stroke="rgba(6,8,24,${h === 0 ? 0.9 : 0.45})" stroke-width="${h === 0 ? 1.2 : 0.8}"/>`;
-      if (axis && h % 6 === 0) svg += `<text x="${x(t).toFixed(1)}" y="${H - 4}" text-anchor="middle" ${mono}>${h === 0 ? `${pad(new Date(t).getUTCDate())}/` : ""}${pad(h)}Z</text>`;
+      // Labels at either end anchor inward so they aren't cut off.
+      const anchor = x(t) < L0 + 16 ? "start" : x(t) > W - R0 - 16 ? "end" : "middle";
+      if (axis && h % 6 === 0) svg += `<text x="${x(t).toFixed(1)}" y="${H - 4}" text-anchor="${anchor}" ${mono}>${h === 0 ? `${pad(new Date(t).getUTCDate())}/` : ""}${pad(h)}Z</text>`;
     }
     const now = x(Date.now());
     svg += `<line x1="${now.toFixed(1)}" x2="${now.toFixed(1)}" y1="0" y2="24" stroke="#fff" stroke-width="1.4"/>`;
@@ -1306,6 +1308,11 @@
     if (state.view === "pireps") render();
   }
 
+  // "FL090" for one altitude, "FL020–FL160" for several.
+  function flRange(fls) {
+    const lo = ftToFl(Math.min(...fls)), hi = ftToFl(Math.max(...fls));
+    return lo === hi ? lo : `${lo}–${hi}`;
+  }
   function heatCells() {
     const h = state.heat;
     if (h.kind === "off" || !h.reports) return [];
@@ -1331,7 +1338,7 @@
     layers.heat.clearLayers();
     for (const c of heatCells()) {
       if (!c.score) continue;   // only smooth or no-icing reports here
-      const fl = c.fls.length ? ` · ${ftToFl(Math.min(...c.fls))}–${ftToFl(Math.max(...c.fls))}` : "";
+      const fl = c.fls.length ? ` · ${flRange(c.fls)}` : "";
       L.rectangle([[c.lat, c.lon], [c.lat + HEAT_CELL, c.lon + HEAT_CELL]], { renderer: heatRenderer, stroke: false, fillColor: heatColor(c.score), fillOpacity: Math.min(0.75, 0.3 + c.n * 0.06) })
         .bindTooltip(`${c.n} report${c.n === 1 ? "" : "s"} · ${c.mod} moderate or worse · worst ${c.worst}${fl}`, { className: "tw-tip", direction: "top", sticky: true })
         .addTo(layers.heat);
@@ -1366,7 +1373,7 @@
     html += `<p class="note" style="margin:.4rem 0 0">${n.toLocaleString()} ${what} reports from ${hhmmZ(h.from)} to ${hhmmZ(h.to)}${h.alt === "all" ? "" : ` (${HEAT_ALT[h.alt][0]})`} · ${mod.toLocaleString()} moderate or worse${h.loading ? " · updating…" : ""}</p>
       <div class="key">${HEAT_RAMP.map(([min, c], i) => `<span><i style="background:${c}"></i>${min}${HEAT_RAMP[i + 1] ? `–${HEAT_RAMP[i + 1][0] - 1}` : "+"}</span>`).join("")}</div>
       <p class="note" style="margin-top:.15rem">Each 1° cell adds up its reports: light 1, moderate 3, severe 5. Smooth and no-${what} reports count but add nothing.</p>`;
-    if (top.length) html += `<table class="t"><tbody>${top.map((c) => `<tr data-ll="${c.lat + HEAT_CELL / 2},${c.lon + HEAT_CELL / 2}"><td><span class="dot" style="background:${heatColor(c.score)}"></span>${Math.abs(c.lat)}–${Math.abs(c.lat + HEAT_CELL)}°${c.lat >= 0 ? "N" : "S"} ${Math.abs(c.lon + HEAT_CELL)}–${Math.abs(c.lon)}°${c.lon < 0 ? "W" : "E"}<small>${c.n} reports · worst ${esc(c.worst)}${c.fls.length ? ` · ${ftToFl(Math.min(...c.fls))}–${ftToFl(Math.max(...c.fls))}` : ""}</small></td><td>${c.mod} MOD+</td></tr>`).join("")}</tbody></table>`;
+    if (top.length) html += `<table class="t"><tbody>${top.map((c) => `<tr data-ll="${c.lat + HEAT_CELL / 2},${c.lon + HEAT_CELL / 2}"><td><span class="dot" style="background:${heatColor(c.score)}"></span>${Math.abs(c.lat)}–${Math.abs(c.lat + HEAT_CELL)}°${c.lat >= 0 ? "N" : "S"} ${Math.abs(c.lon + HEAT_CELL)}–${Math.abs(c.lon)}°${c.lon < 0 ? "W" : "E"}<small>${c.n} reports · worst ${esc(c.worst)}${c.fls.length ? ` · ${flRange(c.fls)}` : ""}</small></td><td>${c.mod} MOD+</td></tr>`).join("")}</tbody></table>`;
     return html;
   }
 
