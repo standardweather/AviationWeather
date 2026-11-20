@@ -84,6 +84,7 @@
     past: null, pastForm: { ids: "", t: "", hours: 3 },
     nws: null, winds: null, windsError: false, windFcst: "6", windAlt: "9000", route: null,
     radar: { times: [], layers: [], idx: 0, timer: null, opacity: 0.6 },
+    heat: { kind: "off", hours: 6, alt: "all", reports: null, from: 0, to: 0, loading: false, error: false, timer: null },
   };
 
   // —— Map ————————————————————————————————————————————————————————
@@ -95,6 +96,7 @@
   map.attributionControl.setPrefix("");
   [["sat", 260], ["radar", 300], ["hazard", 320], ["tcf", 340], ["artcc", 345], ["tfr", 350], ["route", 360], ["gairmet", 380], ["sigmet", 420], ["pastRadar", 425], ["pastPoly", 430], ["highlight", 450], ["winds", 600], ["points", 620], ["pastPts", 630], ["labels", 640]]
     .forEach(([n, z]) => { map.createPane(n).style.zIndex = z; });
+  map.createPane("heat").style.zIndex = 330;
   map.getPane("labels").style.pointerEvents = "none";
   map.getPane("artcc").style.pointerEvents = "none";
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, attribution: "Esri" }).addTo(map);
@@ -106,6 +108,7 @@
     metars: L.layerGroup(), sigmets: L.layerGroup(), gairmets: L.layerGroup(), pireps: L.layerGroup(), tcf: L.layerGroup(),
     highlight: L.layerGroup().addTo(map), winds: L.layerGroup(), route: L.layerGroup().addTo(map),
     tfr: L.layerGroup(), hazard: L.layerGroup().addTo(map), past: L.layerGroup().addTo(map), artcc: L.layerGroup(),
+    heat: L.layerGroup().addTo(map),
   };
   Object.entries(state.on).forEach(([k, v]) => { if (v && layers[k]) layers[k].addTo(map); });
 
@@ -282,7 +285,7 @@
       return d.getTime();
     };
     const groups = [];
-    let cur = null;
+    let cur = null, validTo = null;
     for (let i = 0; i < tokens.length; i++) {
       const t = tokens[i];
       let m;
@@ -292,7 +295,7 @@
         if (type.endsWith("TEMPO") && /^PROB/.test(t)) i++;
         cur = { type, tok: [] }; groups.push(cur); continue;
       }
-      if (!cur && (m = t.match(/^(\d{2})(\d{2})\/(\d{2})(\d{2})$/))) { cur = { type: "BASE", from: at(m[1], m[2]), tok: [] }; groups.push(cur); continue; }
+      if (!cur && (m = t.match(/^(\d{2})(\d{2})\/(\d{2})(\d{2})$/))) { cur = { type: "BASE", from: at(m[1], m[2]), tok: [] }; validTo = at(m[3], m[4]); groups.push(cur); continue; }
       if (cur && !cur.from && (m = t.match(/^(\d{2})(\d{2})\/(\d{2})(\d{2})$/))) { cur.from = at(m[1], m[2]); cur.to = at(m[3], m[4]); continue; }
       if (cur) cur.tok.push(t);
     }
@@ -321,8 +324,56 @@
       if (prevailing) prev = { wind: out.wind, vis: v, ceil: c, wx: out.wx };
       return out;
     }).filter((p) => p.from);
-    return { raw, periods };
+    return { raw, periods, validTo };
   }
+
+  // —— TAF flight-category timeline ————————————————————————————————————————
+  // Prevailing conditions (initial and FM groups) as one bar, with TEMPO, PROB and BECMG groups on a thinner bar
+  // under it, from now to the end of the TAF (at most 30 hours).
+  const TL_SPAN = 30 * 3600e3;
+  function tafSpan(taf) {
+    const t0 = Math.floor(Date.now() / 3600e3) * 3600e3;
+    const last = taf.validTo || Math.max(...taf.periods.map((p) => p.to || p.from)) + 3 * 3600e3;
+    return [t0, Math.min(t0 + TL_SPAN, Math.max(t0 + 6 * 3600e3, last))];
+  }
+  function tafSegments(taf, t0, t1) {
+    const prev = taf.periods.filter((p) => p.type === "Initial" || p.type === "FM");
+    const end = taf.validTo || t1;
+    const main = prev.map((p, i) => ({ ...p, a: Math.max(p.from, t0), b: Math.min(prev[i + 1]?.from ?? end, t1) })).filter((p) => p.b > p.a);
+    const temp = taf.periods.filter((p) => p.type !== "Initial" && p.type !== "FM" && p.to)
+      .map((p) => ({ ...p, a: Math.max(p.from, t0), b: Math.min(p.to, t1) })).filter((p) => p.b > p.a);
+    return { main, temp, end };
+  }
+  /** opts: { span: [t0, t1] to share an axis, axis: false to leave off the hour labels, label: text at the left } */
+  function tafTimeline(taf, opts = {}) {
+    if (!taf?.periods?.length) return "";
+    const [t0, t1] = opts.span || tafSpan(taf);
+    const { main, temp, end } = tafSegments(taf, t0, t1);
+    if (!main.length && !temp.length) return "";
+    const axis = opts.axis !== false;
+    const L0 = opts.label ? 40 : 2, R0 = 4, W = 336, H = axis ? 40 : 24;
+    const x = (t) => L0 + ((t - t0) / (t1 - t0)) * (W - L0 - R0);
+    const mono = 'font-family="IBM Plex Mono, monospace" font-size="9.5" fill="rgba(255,255,255,.42)"';
+    let svg = "";
+    if (opts.label) svg += `<text x="0" y="12" font-family="IBM Plex Mono, monospace" font-size="10.5" font-weight="600" fill="#fff">${esc(opts.label)}</text>`;
+    if (end < t1) svg += `<rect x="${x(end).toFixed(1)}" y="2" width="${(x(t1) - x(end)).toFixed(1)}" height="20" fill="rgba(255,255,255,.04)"/>`;
+    const tip = (p) => `<title>${esc(p.type)} ${ddhhZ(p.from)}${p.to ? `–${ddhhZ(p.to)}` : ""}: ${p.cat}${p.wx ? ` · ${esc(p.wx)}` : ""} · ${esc(p.wind)}</title>`;
+    main.forEach((p) => { svg += `<rect x="${x(p.a).toFixed(1)}" y="2" width="${Math.max(1, x(p.b) - x(p.a)).toFixed(1)}" height="12" fill="${fcColor(p.cat)}">${tip(p)}</rect>`; });
+    temp.forEach((p) => {
+      const w = Math.max(1, x(p.b) - x(p.a));
+      svg += `<rect x="${x(p.a).toFixed(1)}" y="16" width="${w.toFixed(1)}" height="6" rx="1.5" fill="${fcColor(p.cat)}" opacity="${/PROB/.test(p.type) ? 0.55 : 0.9}">${tip(p)}</rect>`;
+    });
+    for (let t = Math.ceil(t0 / 10800e3) * 10800e3; t <= t1; t += 10800e3) {
+      const h = new Date(t).getUTCHours();
+      svg += `<line x1="${x(t).toFixed(1)}" x2="${x(t).toFixed(1)}" y1="0" y2="23" stroke="rgba(6,8,24,${h === 0 ? 0.9 : 0.45})" stroke-width="${h === 0 ? 1.2 : 0.8}"/>`;
+      if (axis && h % 6 === 0) svg += `<text x="${x(t).toFixed(1)}" y="${H - 4}" text-anchor="middle" ${mono}>${h === 0 ? `${pad(new Date(t).getUTCDate())}/` : ""}${pad(h)}Z</text>`;
+    }
+    const now = x(Date.now());
+    svg += `<line x1="${now.toFixed(1)}" x2="${now.toFixed(1)}" y1="0" y2="24" stroke="#fff" stroke-width="1.4"/>`;
+    const worst = [...main, ...temp].reduce((w, p) => (["VFR", "MVFR", "IFR", "LIFR"].indexOf(p.cat) > ["VFR", "MVFR", "IFR", "LIFR"].indexOf(w) ? p.cat : w), "VFR");
+    return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(opts.label ? `${opts.label} ` : "")}TAF flight categories from ${hhmmZ(t0)} to ${ddhhZ(t1)}, worst ${worst}">${svg}</svg>`;
+  }
+  const TL_KEY = `<p class="note" style="margin-top:.2rem">${Object.entries(FC).map(([k, c]) => `<span style="color:${c}">■</span> ${k}`).join(" · ")} · thin bar: TEMPO, PROB (faded) and BECMG · white line: now</p>`;
 
   async function selectStation(id, fly, instant, keepView) {
     const m = state.metarIndex[id];
@@ -505,6 +556,7 @@
           <td><span class="fc" style="background:${fcColor(m?.flight_category)}">${esc(m?.flight_category || "—")}</span><small>${m ? (m.wind_speed_kt === 0 ? "Calm" : `${m.winddir ?? "VRB"}° ${m.wind_speed_kt}${m.wind_gust_kt ? `G${m.wind_gust_kt}` : ""} kt`) : ""}</small></td>
           <td>${worst ? `<span class="fc" style="background:${fcColor(worst.cat)}">${worst.cat}</span><small>from ${ddhhZ(Math.max(worst.from, Date.now()))}${worst.wx ? ` · ${esc(worst.wx)}` : ""}</small>` : pt.taf === null ? "No TAF" : "Loading…"}</td></tr>`;
       }).join("")}</tbody></table>
+      ${routeTimelines(r)}
       <h5 class="sub">METARs within ±${r.nm} nm · ${r.metars.length}</h5>
       <div class="counts">${Object.entries(FC).map(([k, c]) => `<div style="color:${c}">${cats[k]}<small>${k}</small></div>`).join("")}</div>
       ${lowCat.length ? `<table class="t"><tbody>${lowCat.slice(0, 20).map((m) => `<tr data-ll="${m.lat},${m.lon}"><td><b style="color:#fff">${esc(m.station_id)}</b><small>${Math.round(m.along / NM)} nm along</small></td>
@@ -517,6 +569,14 @@
       ${r.winds.length ? `<p class="note" style="margin-top:0;font-family:var(--mono)">${r.winds.map((w) => `${esc(w.id)} ${w.lv.lv ? "LV" : `${String(w.lv.dir).padStart(3, "0")}/${w.lv.spd}`}`).join(" · ")}</p><p class="note">Change the level in the Winds aloft tab.</p>` : `<p class="note">${state.winds ? "No forecast stations in the corridor at this level." : "Loading…"}</p>`}
       </div>`;
     return html;
+  }
+
+  function routeTimelines(r) {
+    const tafs = r.points.filter((pt) => pt.taf?.periods?.length);
+    if (!tafs.length) return "";
+    const t0 = Math.floor(Date.now() / 3600e3) * 3600e3;
+    const span = [t0, Math.max(...tafs.map((pt) => tafSpan(pt.taf)[1]))];
+    return `<h5 class="sub">TAF flight categories along the route</h5>${tafs.map((pt, i) => tafTimeline(pt.taf, { span, label: pt.id, axis: i === tafs.length - 1 })).join("")}${TL_KEY}`;
   }
 
   function worstTaf(taf, hours) {
@@ -642,6 +702,8 @@
       if (state.nws) html += historyChart(state.nws);
       const t = state.taf;
       if (t) {
+        const tl = tafTimeline(t);
+        if (tl) html += `<h5 class="sub">TAF flight categories</h5>${tl}${TL_KEY}`;
         html += `<h5 class="sub">TAF</h5><table class="t"><thead><tr><th>From</th><th>Wind</th><th>Vis / ceiling</th><th></th></tr></thead><tbody>${t.periods.map((p) =>
           `<tr><td>${ddhhZ(p.from)}<small>${esc(p.type)}</small></td><td>${esc(p.wind)}</td><td>${p.vis ? `${esc(p.vis)} sm` : "—"}<small>${p.ceil && isFinite(p.ceil) ? `ceiling ${(+p.ceil).toLocaleString()} ft` : p.ceil === undefined ? "ceiling as prevailing" : "no ceiling"}${p.wx ? ` · ${esc(p.wx)}` : ""}</small></td><td><span class="fc" style="background:${fcColor(p.cat)}">${p.cat}</span></td></tr>`).join("")}</tbody></table>
           <div class="raw">${esc(t.raw)}</div>`;
@@ -1200,6 +1262,114 @@
     }
   }
 
+  // —— PIREP heatmap ——————————————————————————————————————————————————————
+  // Turbulence or icing PIREPs over the last 3 to 12 hours, from the Iowa Environmental Mesonet's national PIREP
+  // archive (pireps.py, CSV, CORS-enabled), summed into 1° cells: each report adds its intensity (light 1,
+  // moderate 3, severe 5), so a cell's color shows how much and how bad, not just how many.
+  const HEAT_CELL = 1;
+  const HEAT_ALT = { all: ["All altitudes", 0, Infinity], low: ["Below FL180", 0, 18000], high: ["FL180 and up", 18000, Infinity] };
+  const HEAT_RAMP = [[1, "#ffe27a"], [3, "#ffbf47"], [6, "#ff9548"], [10, "#ff6b6b"], [16, "#ff3b30"], [24, "#e65cff"]];
+  const heatColor = (v) => HEAT_RAMP.reduce((c, [min, col]) => (v >= min ? col : c), HEAT_RAMP[0][1]);
+  const heatRenderer = L.canvas({ pane: "heat", padding: 0.3 });
+
+  /** Strongest intensity named in a PIREP's TB or IC text: "LGT-MOD CHOP 230-250" → "LGT-MOD"; null when none. */
+  function textIntensity(text) {
+    const t = String(text || "").toUpperCase().replace(/LIGHT/g, "LGT").replace(/MODERATE/g, "MOD").replace(/SEVERE/g, "SEV").replace(/EXTREME/g, "EXTRM").replace(/SMOOTH/g, "SMTH");
+    const found = t.match(/\b(NEG|NIL|SMTH|LGT-MOD|MOD-SEV|LGT|MOD|SEV|EXTRM)\b/g);
+    if (!found) return null;
+    return found.map((w) => (w === "NIL" ? "NEG" : w)).reduce((a, b) => ((INTENSITY[b] ?? 0) > (INTENSITY[a] ?? 0) ? b : a));
+  }
+
+  async function loadHeat() {
+    const h = state.heat;
+    const to = Math.floor(Date.now() / 60000) * 60000, from = to - h.hours * 3600e3;
+    h.loading = true; h.error = false;
+    if (state.view === "pireps") render();
+    try {
+      const text = await iemText(`${IEM}/cgi-bin/request/gis/pireps.py?sts=${isoZ(from)}&ets=${isoZ(to)}&artcc=_ALL&fmt=csv`);
+      const lines = text.trim().split("\n");
+      const head = (lines.shift() || "").split(",");
+      const col = (name) => head.indexOf(name);
+      h.reports = lines.map((line) => {
+        const c = line.match(/("[^"]*"|[^,]*)(,|$)/g).map((x) => x.replace(/,$/, "").replace(/^"|"$/g, ""));
+        const v = c[col("VALID")] || "";
+        return { t: Date.UTC(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(8, 10), +v.slice(10, 12)),
+          turb: textIntensity(c[col("TURBULENCE")]), ice: textIntensity(c[col("ICING")]), fl: +c[col("FL")] || null,
+          lat: +c[col("LAT")], lon: +c[col("LON")], raw: c[col("REPORT")] || "" };
+      }).filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon) && (p.lat || p.lon));
+      h.from = from; h.to = to;
+    } catch {
+      h.error = true;
+    }
+    h.loading = false;
+    drawHeat();
+    if (state.view === "pireps") render();
+  }
+
+  function heatCells() {
+    const h = state.heat;
+    if (h.kind === "off" || !h.reports) return [];
+    const [, lo, hi] = HEAT_ALT[h.alt];
+    const cells = new Map();
+    for (const p of h.reports) {
+      const i = p[h.kind];
+      if (!i) continue;
+      if (h.alt !== "all" && (p.fl == null || p.fl < lo || p.fl >= hi)) continue;
+      const k = `${Math.floor(p.lat / HEAT_CELL)},${Math.floor(p.lon / HEAT_CELL)}`;
+      const c = cells.get(k) || cells.set(k, { lat: Math.floor(p.lat / HEAT_CELL) * HEAT_CELL, lon: Math.floor(p.lon / HEAT_CELL) * HEAT_CELL, n: 0, mod: 0, score: 0, worst: "NEG", fls: [] }).get(k);
+      const v = INTENSITY[i] ?? 0;
+      c.n++;
+      c.score += v;
+      if (v >= 3) c.mod++;
+      if (v > (INTENSITY[c.worst] ?? 0)) c.worst = i;
+      if (p.fl) c.fls.push(p.fl);
+    }
+    return [...cells.values()];
+  }
+
+  function drawHeat() {
+    layers.heat.clearLayers();
+    for (const c of heatCells()) {
+      if (!c.score) continue;   // only smooth or no-icing reports here
+      const fl = c.fls.length ? ` · ${ftToFl(Math.min(...c.fls))}–${ftToFl(Math.max(...c.fls))}` : "";
+      L.rectangle([[c.lat, c.lon], [c.lat + HEAT_CELL, c.lon + HEAT_CELL]], { renderer: heatRenderer, stroke: false, fillColor: heatColor(c.score), fillOpacity: Math.min(0.75, 0.3 + c.n * 0.06) })
+        .bindTooltip(`${c.n} report${c.n === 1 ? "" : "s"} · ${c.mod} moderate or worse · worst ${c.worst}${fl}`, { className: "tw-tip", direction: "top", sticky: true })
+        .addTo(layers.heat);
+    }
+  }
+
+  function setHeat(changes) {
+    const h = state.heat;
+    const reload = changes.hours && changes.hours !== h.hours;
+    Object.assign(h, changes);
+    clearInterval(h.timer);
+    if (h.kind === "off") { drawHeat(); render(); return; }
+    // Keep it current while it's on.
+    h.timer = setInterval(loadHeat, 10 * 60000);
+    if (!h.reports || reload || Date.now() - h.to > 10 * 60000) loadHeat(); else { drawHeat(); render(); }
+  }
+
+  function heatPanel() {
+    const h = state.heat;
+    const btns = (key, opts) => opts.map(([v, label]) => `<button data-heat-${key}="${v}" aria-pressed="${h[key] === v}">${label}</button>`).join("");
+    let html = `<h5 class="sub">Heatmap</h5>
+      <div class="satpick" style="padding:0"><span>Show</span>${btns("kind", [["off", "Off"], ["turb", "Turbulence"], ["ice", "Icing"]])}</div>`;
+    if (h.kind === "off") return html + `<p class="note">Shade the map by turbulence or icing reported over the last few hours.</p>`;
+    html += `<div class="satpick" style="padding:0"><span>Last</span>${btns("hours", [[3, "3 h"], [6, "6 h"], [12, "12 h"]])}</div>
+      <div class="satpick" style="padding:0"><span>Altitude</span>${btns("alt", Object.entries(HEAT_ALT).map(([k, [label]]) => [k, label]))}</div>`;
+    if (h.loading && !h.reports) return html + `<p class="note">Loading PIREPs…</p>`;
+    if (h.error && !h.reports) return html + `<p class="note">The PIREP archive didn't answer. Try again in a few minutes.</p>`;
+    const cells = heatCells();
+    const n = cells.reduce((a, c) => a + c.n, 0), mod = cells.reduce((a, c) => a + c.mod, 0);
+    const top = cells.filter((c) => c.score).sort((a, b) => b.score - a.score).slice(0, 5);
+    const what = h.kind === "turb" ? "turbulence" : "icing";
+    html += `<p class="note" style="margin:.4rem 0 0">${n.toLocaleString()} ${what} reports from ${hhmmZ(h.from)} to ${hhmmZ(h.to)}${h.alt === "all" ? "" : ` (${HEAT_ALT[h.alt][0]})`} · ${mod.toLocaleString()} moderate or worse${h.loading ? " · updating…" : ""}</p>
+      <div class="key">${HEAT_RAMP.map(([min, c], i) => `<span><i style="background:${c}"></i>${min}${HEAT_RAMP[i + 1] ? `–${HEAT_RAMP[i + 1][0] - 1}` : "+"}</span>`).join("")}</div>
+      <p class="note" style="margin-top:.15rem">Each 1° cell adds up its reports: light 1, moderate 3, severe 5. Smooth and no-${what} reports count but add nothing.</p>`;
+    if (top.length) html += `<table class="t"><tbody>${top.map((c) => `<tr data-ll="${c.lat + HEAT_CELL / 2},${c.lon + HEAT_CELL / 2}"><td><span class="dot" style="background:${heatColor(c.score)}"></span>${Math.abs(c.lat)}–${Math.abs(c.lat + HEAT_CELL)}°${c.lat >= 0 ? "N" : "S"} ${Math.abs(c.lon + HEAT_CELL)}–${Math.abs(c.lon)}°${c.lon < 0 ? "W" : "E"}<small>${c.n} reports · worst ${esc(c.worst)}${c.fls.length ? ` · ${ftToFl(Math.min(...c.fls))}–${ftToFl(Math.max(...c.fls))}` : ""}</small></td><td>${c.mod} MOD+</td></tr>`).join("")}</tbody></table>`;
+    return html;
+  }
+
   function pirepsView() {
     const rel = state.pireps.filter((p) => p.kind === "llws" || (INTENSITY[pirepIntensity(p)] ?? 0) >= 3);
     const n = (k) => state.pireps.filter((p) => p.kind === k && (k === "llws" || (INTENSITY[pirepIntensity(p)] ?? 0) > 0)).length;
@@ -1210,6 +1380,7 @@
         <td><span class="dot" style="background:${p.kind === "ice" ? "#4f8dff" : intensityColor(pirepIntensity(p))}"></span>${p.kind === "ice" ? `Icing ${esc(pirepIntensity(p) || "")}` : p.kind === "llws" ? "Wind shear" : `Turb ${esc(pirepIntensity(p) || "")}`}
           <small>${esc(p.aircraft_ref || "")} · ${p.altitude_ft_msl ? `${Math.round(p.altitude_ft_msl / 100)}`.padStart(3, "0").replace(/^/, "FL") : "FL?"} · ${esc((p.raw_text || "").split(" ")[0])}</small></td></tr>`).join("")}</tbody></table>`
         : `<p class="note">None reported.</p>`}
+      ${heatPanel()}
       </div>`;
   }
 
@@ -1521,6 +1692,9 @@
     if (a) { e.preventDefault(); if (a.dataset.pastprint) pastPrint(); else pastCsv(); return; }
     const t = e.target.closest("button, tr");
     if (!t) return;
+    if (t.dataset.heatKind) { setHeat({ kind: t.dataset.heatKind }); return; }
+    if (t.dataset.heatHours) { setHeat({ hours: +t.dataset.heatHours }); return; }
+    if (t.dataset.heatAlt) { setHeat({ alt: t.dataset.heatAlt }); return; }
     if (t.dataset.pasth) { state.pastForm.hours = +t.dataset.pasth; if (state.past) submitPast(); else render(); return; }
     if (t.dataset.cor) {
       const text = state.route?.text || $("routeQ").value;
