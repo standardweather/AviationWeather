@@ -4,11 +4,11 @@
  *   NOAA map services (AWC aviation layers)  METARs, TAFs, PIREPs, G-AIRMETs, SIGMETs, international SIGMETs, CWAs, TCF
  *   nowCOAST (NOAA)                          radar mosaic loop, GOES satellite
  *   NWS API (api.weather.gov)                US TAFs, each station's newest METAR and 24-hour history,
- *                                            winds and temperatures aloft (FD bulletins)
  * Collected by GitHub Actions into data/ (tools/collect.py), because these sources send no CORS headers:
  *   FAA TFR list and shapes (tfr.json), OurAirports field elevations and runways (airports.json)
  * FAA ARTCC boundaries, simplified (airmetcast/artcc.json, shared with AIRMETcast and FutureWeather)
- * From FutureWeather (same site): GFS-derived turbulence and icing overlays for the hour nearest now
+ * From FutureWeather (same site): GFS-derived turbulence and icing overlays for the hour nearest now, and
+ *   GFS winds and temperatures aloft at the old FD bulletin points (the NWS retired the US FB bulletin)
  * Iowa Environmental Mesonet archives (Look back): past METARs, TAFs, SIGMETs, G-AIRMETs and PIREPs
  */
 (() => {
@@ -438,49 +438,23 @@
       <p class="note" style="margin-top:.2rem">Top strip: flight category · <span style="color:rgba(255,255,255,.7)">line</span> wind · <span style="color:#ff9548">dots</span> gusts (kt)</p>`;
   }
 
-  // —— Winds and temperatures aloft (NWS FD bulletins) ——————————————————————
+  // —— Winds and temperatures aloft (GFS model winds, written by FutureWeather) ————————————
+  // The NWS retired the US FD/FB winds aloft bulletin with the NAM, so FutureWeather works the same points and
+  // levels out of each GFS run (make_airmetcast.py). Each choice picks the forecast hour nearest that far ahead.
   const FD_ALTS = ["3000", "6000", "9000", "12000", "18000", "24000", "30000", "34000", "39000"];
-  const FD_PRODUCTS = { 6: ["FD1", "US1"], 24: ["FD3", "US3"] };   // the NWS API doesn't carry the 12-hour FD2
+  const WIND_LEADS = ["6", "12", "24"];
+  const WINDS_URL = "/FutureWeather/airmetcast/data";
   async function loadWinds() {
-    const [code, loc] = FD_PRODUCTS[state.windFcst];
-    const list = await (await fetch(`https://api.weather.gov/products/types/${code}/locations/${loc}`)).json();
-    const latest = (list["@graph"] || [])[0];
-    if (!latest) throw new Error("No winds-aloft bulletin");
-    const prod = await (await fetch(latest["@id"] || `https://api.weather.gov/products/${latest.id}`)).json();
-    state.winds = parseFd(prod.productText || "");
+    const bust = `t=${Math.floor(Date.now() / 600000)}`;
+    const idx = await (await fetch(`${WINDS_URL}/winds.json?${bust}`)).json();
+    const init = Date.parse(idx.init), hours = idx.hours || [];
+    if (!hours.length || !Number.isFinite(init)) throw new Error("No model winds");
+    const want = Date.now() + +state.windFcst * 3600e3;
+    const fhr = hours.reduce((b, h) => (Math.abs(init + h * 3600e3 - want) < Math.abs(init + b * 3600e3 - want) ? h : b));
+    const doc = await (await fetch(`${WINDS_URL}/winds/f${String(fhr).padStart(3, "0")}.json?${bust}`)).json();
+    state.winds = { model: idx.model || "GFS", init, fhr, valid: Date.parse(doc.valid), stations: doc.stations || [] };
+    state.windsError = false;
     drawWinds();
-  }
-
-  /** Decode an FD bulletin. Columns end where each altitude label ends; groups are DDff, DDff±TT, or DDffTT
-   *  above 24,000 ft (temperatures negative). DD over 50 means 100 kt or more; 9900 is light and variable. */
-  function parseFd(text) {
-    const lines = text.replace(/\r/g, "").split("\n");
-    const hi = lines.findIndex((l) => /^FT\s+3000/.test(l));
-    if (hi < 0) return { stations: [] };
-    const cols = [...lines[hi].matchAll(/\d{4,5}/g)].map((m) => ({ alt: m[0], end: m.index + m[0].length }));
-    const valid = (text.match(/VALID\s+(\d{6}Z)/) || [])[1];
-    const use = (text.match(/FOR USE\s+([\d-]+Z)/) || [])[1];
-    const based = (text.match(/BASED ON\s+(\d{6}Z)/) || [])[1];
-    const stations = [];
-    for (const line of lines.slice(hi + 1)) {
-      const m = line.match(/^([A-Z0-9]{3})\s/);
-      if (!m) continue;
-      const levels = {};
-      let start = 4;
-      for (const c of cols) {
-        const g = line.slice(start, c.end).trim();
-        start = c.end;
-        if (!/^\d{4}([+-]\d{2}|\d{2})?$/.test(g)) continue;
-        let dd = +g.slice(0, 2), ff = +g.slice(2, 4);
-        const temp = g.length === 4 ? null : /[+-]/.test(g) ? +g.slice(4) : -(+g.slice(4));
-        if (dd === 99 && ff === 0) { levels[c.alt] = { lv: true, temp }; continue; }
-        if (dd > 50) { dd -= 50; ff += 100; }
-        levels[c.alt] = { dir: dd * 10, spd: ff, temp };
-      }
-      const st = state.metarIndex[`K${m[1]}`] || state.metarIndex[m[1]] || state.metarIndex[`P${m[1]}`];
-      if (st) stations.push({ id: m[1], lat: st.lat, lon: st.lon, levels });
-    }
-    return { valid, use, based, stations };
   }
 
   const windText = (lv) => (!lv ? "—" : lv.lv ? "Light and variable" : `${String(lv.dir).padStart(3, "0")}° ${lv.spd} kt`);
@@ -520,21 +494,22 @@
 
   function windsView() {
     const w = state.winds;
-    const fc = Object.keys(FD_PRODUCTS).map((k) => `<button data-wfc="${k}" aria-pressed="${state.windFcst === k}">${k} h forecast</button>`).join("");
+    const fc = WIND_LEADS.map((k) => `<button data-wfc="${k}" aria-pressed="${state.windFcst === k}">${k} h ahead</button>`).join("");
     const alts = FD_ALTS.map((a) => `<button data-walt="${a}" aria-pressed="${state.windAlt === a}">${+a >= 18000 ? `FL${a.slice(0, 3)}` : `${+a / 1000}k`}</button>`).join("");
-    let html = `<div class="satpick" style="padding:.7rem 1.25rem 0"><span>Product</span>${fc}</div>
+    let html = `<div class="satpick" style="padding:.7rem 1.25rem 0"><span>Forecast</span>${fc}</div>
       <div class="satpick" style="padding:.45rem 1.25rem 0;flex-wrap:wrap"><span>Map level</span>${alts}</div><div class="pad">`;
     if (!w) return html + `<p class="note">${state.windsError ? "Winds aloft unavailable right now." : "Loading winds aloft…"}</p></div>`;
-    html += `<p class="note" style="margin-top:0">NWS FD forecast valid ${esc(w.valid || "—")}${w.use ? `, for use ${esc(w.use)}` : ""} · based on ${esc(w.based || "—")} data · ${w.stations.length} stations. Barbs on the map show the selected level.</p>`;
+    html += `<p class="note" style="margin-top:0">${esc(w.model)} model winds valid ${ddhhZ(w.valid)} (${w.fhr} h forecast from the ${ddhhZ(w.init)} run) · ${w.stations.length} points. Barbs on the map show the selected level.</p>
+      <p class="note">Model output, not an official NWS winds aloft forecast. The NWS no longer issues its US winds aloft bulletin, so these are worked out from the GFS at the same points and levels.</p>`;
     const ref = state.station && state.metarIndex[state.station];
     const near = ref ? nearestFd(ref.lat, ref.lon) : null;
     if (near) {
       html += `<h5 class="sub">Nearest to ${esc(state.station)}: ${esc(near.st.id)} · ${Math.round(near.d / 1.852)} nm away</h5>
         <table class="t"><thead><tr><th>Altitude</th><th>Wind</th><th>Temp</th></tr></thead><tbody>${FD_ALTS.map((a) =>
           `<tr${a === state.windAlt ? ' style="background:rgba(74,209,255,.07)"' : ""}><td>${altLabel(a)}</td><td>${windText(near.st.levels[a])}</td><td>${tempText(near.st.levels[a])}</td></tr>`).join("")}</tbody></table>
-        <p class="note">Blank levels are within 1,500 ft of the station (no wind) or 2,500 ft (no temperature).</p>`;
+        <p class="note">As in the old bulletin, blank levels are within 1,500 ft of the ground (no wind) or 2,500 ft (no temperature), and 3,000 ft has no temperature.</p>`;
     } else {
-      html += `<p class="note">Select an airport (Airports tab or the map) to see the full column at the nearest forecast station.</p>`;
+      html += `<p class="note">Select an airport (Airports tab or the map) to see the full column at the nearest forecast point.</p>`;
     }
     return html + `</div>`;
   }
@@ -567,8 +542,8 @@
       ${r.advisories.map((a) => `<p class="note" style="margin:.2rem 0"><i class="dot" style="background:${a.color}"></i><b style="color:#fff">${esc(a.title)}</b><br>${esc(a.detail)}</p>`).join("") || `<p class="note">None of the advisories shown on the map cross the corridor.</p>`}
       <h5 class="sub">PIREPs in the corridor, moderate or greater · ${r.pireps.length}</h5>
       ${r.pireps.length ? `<table class="t"><tbody>${r.pireps.slice(0, 20).map((p) => `<tr data-ll="${p.lat},${p.lon}"><td>${hhmmZ(p.observation_time)}</td><td>${p.kind === "ice" ? "Icing" : p.kind === "llws" ? "Wind shear" : "Turbulence"} ${esc(pirepIntensity(p) || "")}<small>${esc(p.aircraft_ref || "")} · ${p.altitude_ft_msl ? ftToFl(p.altitude_ft_msl) : "FL?"}</small></td></tr>`).join("")}</tbody></table>` : `<p class="note">None reported.</p>`}
-      <h5 class="sub">Winds aloft along the route · ${altLabel(state.windAlt)}</h5>
-      ${r.winds.length ? `<p class="note" style="margin-top:0;font-family:var(--mono)">${r.winds.map((w) => `${esc(w.id)} ${w.lv.lv ? "LV" : `${String(w.lv.dir).padStart(3, "0")}/${w.lv.spd}`}`).join(" · ")}</p><p class="note">Change the level in the Winds aloft tab.</p>` : `<p class="note">${state.winds ? "No forecast stations in the corridor at this level." : "Loading…"}</p>`}
+      <h5 class="sub">Winds aloft along the route · ${altLabel(state.windAlt)}${state.winds ? ` · GFS model, valid ${ddhhZ(state.winds.valid)}` : ""}</h5>
+      ${r.winds.length ? `<p class="note" style="margin-top:0;font-family:var(--mono)">${r.winds.map((w) => `${esc(w.id)} ${w.lv.lv ? "LV" : `${String(w.lv.dir).padStart(3, "0")}/${w.lv.spd}`}`).join(" · ")}</p><p class="note">Change the level in the Winds aloft tab.</p>` : `<p class="note">${state.winds ? "No forecast points in the corridor at this level." : state.windsError ? "Winds aloft unavailable right now." : "Loading…"}</p>`}
       </div>`;
     return html;
   }
@@ -1808,7 +1783,7 @@
     state.on[k] = e.target.checked;
     if (k === "radar") { loadRadar(true); return; }
     if (k === "artcc" && e.target.checked) loadArtcc();
-    if (k === "winds" && e.target.checked && !state.winds) loadWinds().catch(() => {});
+    if (k === "winds" && e.target.checked && !state.winds) loadWinds().catch(() => { state.windsError = true; });
     e.target.checked ? layers[k].addTo(map) : layers[k].remove();
   });
 
