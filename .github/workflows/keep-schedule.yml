@@ -1,0 +1,68 @@
+name: Keep the schedule
+
+# GitHub starts scheduled runs hours late or drops them (4-8 h delays seen in Nov 2026, and
+# whole days of missed runs). This workflow is a timer that doesn't depend on the schedule:
+# one run sleeps until the next slot below, starts pages.yml, then starts the next timer.
+# A job can run for at most 6 hours, so longer gaps are crossed in hops. The schedule here
+# only restarts the timer if it ever stops; a second timer notices the first and exits.
+on:
+  schedule:
+    - cron: "47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  timer:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      # Times (UTC, HH:MM) at which pages.yml should start; "HH:MM=x" also passes the input slot=x.
+      SLOTS: "00:07 00:37 01:07 01:37 02:07 02:37 03:07 03:37 04:07 04:37 05:07 05:37 06:07 06:37 07:07 07:37 08:07 08:37 09:07 09:37 10:07 10:37 11:07 11:37 12:07 12:37 13:07 13:37 14:07 14:37 15:07 15:37 16:07 16:37 17:07 17:37 18:07 18:37 19:07 19:37 20:07 20:37 21:07 21:37 22:07 22:37 23:07 23:37"
+    steps:
+      - name: Exit if another timer is already running
+        id: check
+        run: |
+          # The timer that started this one finishes a few seconds after starting it.
+          sleep 45
+          others=$(gh run list --workflow keep-schedule.yml --limit 20 --json databaseId,status \
+            --jq "[.[] | select(.databaseId != ${{ github.run_id }} and (.status == \"in_progress\" or .status == \"queued\" or .status == \"waiting\" or .status == \"pending\"))] | length")
+          if [ "$others" -gt 0 ]; then echo "Another timer is running; this one exits."; echo "dup=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Sleep until the next slot, then start pages.yml
+        if: steps.check.outputs.dup != 'true'
+        run: |
+          read -r wait slot input < <(python3 - <<'PY'
+          import datetime as dt, os
+          now = dt.datetime.now(dt.timezone.utc)
+          cands = []
+          for s in os.environ["SLOTS"].split():
+              hm, _, arg = s.partition("=")
+              h, m = map(int, hm.split(":"))
+              for d in (0, 1):
+                  t = (now + dt.timedelta(days=d)).replace(hour=h, minute=m, second=0, microsecond=0)
+                  if t > now + dt.timedelta(minutes=2):
+                      cands.append((t, arg or "-"))
+          t, arg = min(cands)
+          print(int((t - now).total_seconds()), t.strftime("%H:%M"), arg)
+          PY
+          )
+          max=$(( 340 * 60 ))
+          if [ "$wait" -gt "$max" ]; then
+            echo "Next slot $slot UTC is more than 5h40m away; sleeping 5h40m and handing over to a new timer."
+            sleep "$max"
+          else
+            echo "Sleeping ${wait}s until $slot UTC."
+            sleep "$wait"
+            if [ "$input" = "-" ]; then gh workflow run pages.yml --ref main
+            else gh workflow run pages.yml --ref main -f slot="$input"; fi
+          fi
+
+      - name: Start the next timer
+        if: ${{ !cancelled() && steps.check.outputs.dup != 'true' }}
+        run: gh workflow run keep-schedule.yml --ref main
