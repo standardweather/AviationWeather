@@ -2,7 +2,8 @@ name: Deploy to GitHub Pages
 
 # Most of the page reads its data live in the browser. The FAA's TFR services send no CORS headers and
 # OurAirports' runway files are too large for a browser, so tools/collect.py gathers both into site/data
-# on every run, and the schedule keeps the TFRs current.
+# on every run, and the schedule keeps the TFRs current. GitHub runs that schedule hours late or not at
+# all, so keep-schedule.yml also starts this workflow at :07 and :37 without relying on it.
 on:
   schedule:
     - cron: "7,37 * * * *"
@@ -24,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,5 +38,13 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+      # deploy-pages sometimes can't see the github-pages artifact the moment it's uploaded ("No artifacts
+      # named github-pages were found"). It fails before creating a deployment, so wait and try once more.
       - id: deployment
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+      - if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+      - id: deployment_retry
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v4
