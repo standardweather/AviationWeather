@@ -7,18 +7,18 @@
   <!-- Unlisted test page: not linked from the site, kept out of search engines. -->
   <meta name="robots" content="noindex, nofollow" />
   <meta name="description" content="Experimental model-derived aviation hazard areas. Not an AIRMET or SIGMET and not for flight planning." />
-  <meta name="theme-color" content="#070914" />
+  <meta name="theme-color" content="#e9edeb" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon-64.png" />
-  <meta name="color-scheme" content="dark" />
+  <meta name="color-scheme" content="light" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <!-- Shared theme and console layout from the main site (standardweather.github.io repo). -->
-  <link rel="stylesheet" href="/css/site.css?v=20261024a" />
-  <link rel="stylesheet" href="/css/console.css?v=2" />
+  <link rel="stylesheet" href="/css/site.css?v=20261127" />
+  <link rel="stylesheet" href="/css/console.css?v=3" />
   <style>
-    .exp { margin: 0.9rem 1.25rem 0.2rem; padding: 0.55rem 0.75rem; border: 1px dashed #ffbf47; border-radius: 8px; background: rgba(255, 191, 71, 0.07);
+    .exp { margin: 0.9rem 1.25rem 0.2rem; padding: 0.55rem 0.75rem; border: 1px dashed #ffbf47; border-radius: 6px; background: rgba(255, 191, 71, 0.07);
       font-size: 0.78rem; line-height: 1.45; color: var(--text2); }
     .exp b { color: #ffbf47; }
     .grp { padding: 0.6rem 1.25rem 0.2rem; border-top: 1px solid var(--rule); }
@@ -31,20 +31,20 @@
     .altf { padding: 0.6rem 1.25rem 0.8rem; border-top: 1px solid var(--rule); }
     .altf h4 { margin: 0 0 0.35rem; font: 600 0.72rem var(--font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); }
     .altf input { width: 100%; accent-color: var(--accent); appearance: auto; -webkit-appearance: auto; padding: 0; border: 0; background: none; min-height: 0; box-shadow: none; }
-    .altf output { font: 500 0.85rem var(--mono); color: #fff; }
+    .altf output { font: 500 0.85rem var(--mono); color: var(--ink); }
     .areas { padding: 0.4rem 0 0.8rem; border-top: 1px solid var(--rule); }
     .areas h4 { margin: 0.3rem 1.25rem 0.3rem; font: 600 0.72rem var(--font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); }
     .area { all: unset; box-sizing: border-box; display: grid; grid-template-columns: 0.6rem 1fr auto; gap: 0.55rem; align-items: baseline; width: 100%;
       padding: 0.35rem 1.25rem; cursor: pointer; font-size: 0.82rem; color: var(--text2); }
-    .area:hover { background: rgba(255, 255, 255, 0.04); color: #fff; }
+    .area:hover { background: rgba(255, 255, 255, 0.04); color: var(--ink); }
     .area i { width: 0.6rem; height: 0.6rem; border-radius: 2px; }
     .area span small { display: block; color: var(--text3); font-size: 0.72rem; }
-    .area b { font: 500 0.76rem var(--mono); color: #fff; font-weight: 500; white-space: nowrap; }
+    .area b { font: 500 0.76rem var(--mono); color: var(--ink); font-weight: 500; white-space: nowrap; }
     .method { margin: 0 1.25rem 1rem; font-size: 0.78rem; color: var(--text2); }
     .method summary { cursor: pointer; color: var(--text2); }
     .method p, .method li { line-height: 1.5; }
     .method ul { padding-left: 1.1rem; margin: 0.4rem 0; }
-    .hz-label { background: rgba(8, 10, 24, 0.82); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 5px; color: #fff; box-shadow: none;
+    .hz-label { background: rgba(12, 22, 21, 0.82); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 5px; color: var(--ink); box-shadow: none;
       font: 500 0.68rem var(--mono); padding: 1px 5px; white-space: nowrap; }
     .hz-label::before { display: none; }
     .artcc-label { background: none; border: 0; box-shadow: none; color: #c9d2f0; font: 600 0.72rem var(--mono); letter-spacing: 0.08em; opacity: 0.75;
@@ -57,7 +57,7 @@
     .pop td:first-child { color: #8a90ad; }
     .pop .xp { margin: 0.4rem 0 0; font-size: 0.72rem; color: #ffbf47; }
     .wm { position: absolute; z-index: 700; left: 50%; transform: translateX(-50%); top: 0.6rem; padding: 0.25rem 0.7rem; border-radius: 6px;
-      background: rgba(8, 10, 24, 0.85); border: 1px dashed #ffbf47; font: 500 0.74rem var(--mono); color: #ffbf47; pointer-events: none; white-space: nowrap; }
+      background: rgba(12, 22, 21, 0.85); border: 1px dashed #ffbf47; font: 500 0.74rem var(--mono); color: #ffbf47; pointer-events: none; white-space: nowrap; }
     .maplegend { width: 15.5rem; }
     .maplegend .row { display: flex; align-items: center; gap: 0.45rem; font-size: 0.72rem; color: var(--text2); margin-top: 0.2rem; }
     .scrub .when { min-width: 9.5rem; text-align: right; }
